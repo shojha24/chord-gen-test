@@ -10,7 +10,6 @@ class InputEmbeddings(nn.Module):
 
     def forward(self, x):
         return self.embedding(x) * (self.d_model ** 0.5)
-    
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, seq_len: int, dropout: float):

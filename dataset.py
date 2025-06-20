@@ -31,41 +31,38 @@ class ChordMatchedDataset(Dataset):
             print(f"Loading dataset from {self.cache_path}...")
             self.load_dataset_hdf5(self.cache_path)
             print(f"Dataset loaded with {len(self.raw_X)} samples")
-            print(self.raw_X[0][200])  # Print sample for verification
         else:
             # Preprocess all data during initialization
             print("Preprocessing dataset...")
             self.raw_X, self.y = self.preprocess_and_view()
             print(f"Dataset loaded with {len(self.raw_X)} samples")
             self.save_dataset_hdf5(self.cache_path)
-            print(self.raw_X[0][200])  # Print sample for verification
-
 
     def __len__(self):
         return len(self.raw_X)
 
     def __getitem__(self, idx):
-        # Get the input features and target chords for the given index
         x = np.array(self.raw_X[idx])
         target = np.array(self.y[idx])
         
-        # Pad or truncate sequences to seq_len
         if len(x) < self.seq_len:
             pad_len = self.seq_len - len(x)
-            # Pad with -1 for masking (since your features are normalized to 0-1)
-            x = np.pad(x, ((0, pad_len), (0, 0)), constant_values=-1)
-            target = np.pad(target, (0, pad_len), constant_values=-1)
-        else:
-            # Truncate if longer than seq_len
-            x = x[:self.seq_len]
-            target = target[:self.seq_len]
+            # Use zeros for padding instead of -1
+            x = np.pad(x, ((0, pad_len), (0, 0)), constant_values=0)
+            target = np.pad(target, (0, pad_len), constant_values=-1)  # Keep -1 for targets
         
-        # Convert to tensors
-        x = torch.FloatTensor(x)
-        target = torch.LongTensor(target)
+        # Create padding mask
+        is_padded = np.zeros(self.seq_len, dtype=bool)
+        if len(self.raw_X[idx]) < self.seq_len:
+            is_padded[len(self.raw_X[idx]):] = True
         
-        return x, target
+        return {
+            "feature": torch.FloatTensor(x),
+            "target": torch.LongTensor(target),
+            "padding_mask": torch.BoolTensor(is_padded)
+        }
 
+        
     def normalize_audio_features(self, data):
         """
         Normalize audio features: mel bins, chroma bins, and onset strength
@@ -91,15 +88,35 @@ class ChordMatchedDataset(Dataset):
         y = []
         
         # Iterate through all files in the directory
-        for i in range(100):
-            """This is for outputs."""
+        for i in range(500):
             file_num = i + 1
             n_frames = 0
 
             beatinfo_path = os.path.join(self.annotation_data, f"{file_num :04d}_beatinfo.arff")
             audio_path = os.path.join(self.mix_path, f"{file_num :04d}_mix.flac")
 
-            """This is for inputs."""
+            """This is for targets."""
+            beatinfo_df = pd.read_csv(beatinfo_path, comment="@", header=None)
+            beatinfo_df.columns = self.beatinfo_headers
+
+            usable = True
+
+            for j in range(beatinfo_df.index.size):
+                beatinfo_df.iat[j, 3] = beatinfo_df.iat[j, 3].replace("'", "")
+                if beatinfo_df.iat[j, 3] == "BASS_NOTE_EXCEPTION" or beatinfo_df.iat[j, 3] == "N.C.":
+                    if j > 0:
+                        beatinfo_df.iat[j, 3] = beatinfo_df.iat[j-1, 3]
+                    else:
+                        usable = False
+                        break
+                else:
+                    beatinfo_df.iat[j, 3] = self.inverted_encodings[beatinfo_df.iat[j, 3]]
+
+            if not usable:
+                print(f"Skipping file {file_num} due to unusable annotations.")
+                continue
+
+            """This is for features."""
             try:
                 audio, _ = librosa.load(audio_path, sr=self.sample_rate)  # Fixed syntax
                 y_harm = librosa.effects.harmonic(y=audio, margin=8)
@@ -126,19 +143,6 @@ class ChordMatchedDataset(Dataset):
                 
             except Exception as e:
                 print(e)
-            
-            beatinfo_df = pd.read_csv(beatinfo_path, comment="@", header=None)
-            beatinfo_df.columns = self.beatinfo_headers
-
-            for j in range(beatinfo_df.index.size):
-                beatinfo_df.iat[j, 3] = beatinfo_df.iat[j, 3].replace("'", "")
-                if beatinfo_df.iat[j, 3] == "BASS_NOTE_EXCEPTION" or beatinfo_df.iat[j, 3] == "N.C.":
-                    if j > 0:
-                        beatinfo_df.iat[j, 3] = beatinfo_df.iat[j-1, 3]
-                    else:
-                        beatinfo_df.iat[j, 3] = 24
-                else:
-                    beatinfo_df.iat[j, 3] = self.inverted_encodings[beatinfo_df.iat[j, 3]]
 
             # expand the chord list (n_beats) to match the length of the audio features (n_frames)
             coarse_times = beatinfo_df['Start time in seconds'].astype(float).to_numpy()
@@ -176,7 +180,7 @@ class ChordMatchedDataset(Dataset):
                 self.y.append(grp['targets'][:].tolist())
 
         
-if __name__ == "__main__":
+"""if __name__ == "__main__":
     mix_path = "dataset\\mixes"
     annotation_path = "dataset\\annotations"
     sample_rate = 22050
@@ -189,4 +193,4 @@ if __name__ == "__main__":
     # Example usage
     for i in range(len(dataset)):
         x, target = dataset[i]
-        print(f"Sample {i}: x shape: {x.shape}, target shape: {target.shape}")
+        print(f"Sample {i}: x shape: {x.shape}, target shape: {target.shape}")"""

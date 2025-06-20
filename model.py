@@ -1,6 +1,16 @@
 import torch
 import torch.nn as nn 
 
+class InputProjection(nn.Module):
+    def __init__(self, n_bins: int, d_model: int):
+        super().__init__()
+        self.n_bins = n_bins
+        self.d_model = d_model
+        self.linear = nn.Linear(n_bins, d_model)
+
+    def forward(self, x):
+        return self.linear(x)
+
 class TemporalPositionalEncoding(nn.Module):
     def __init__(self, d_model: int, seq_len: int, hop_length: int, sample_rate: int, dropout: float, scale: float = 0.05):
         super().__init__()
@@ -13,7 +23,7 @@ class TemporalPositionalEncoding(nn.Module):
         position = torch.arange(0, seq_len, dtype=torch.float).unsqueeze(1) * time_per_step
         
         # (1, d_model // 2)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(10000.0) / d_model))
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
 
         # Create positional encodings
         pe = torch.zeros(seq_len, d_model)
@@ -115,10 +125,20 @@ class EncoderBlock(nn.Module):
             ResidualConnection(dropout)
         ])
 
-    def forward(self, x, src_mask):
-        x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, src_mask))
+    def forward(self, x, src_key_padding_mask=None):
+        # Convert padding mask to attention mask format if needed
+        if src_key_padding_mask is not None:
+            # Convert (batch_size, seq_len) to (batch_size, 1, 1, seq_len) for attention
+            attention_mask = src_key_padding_mask.unsqueeze(1).unsqueeze(2)
+            # Invert mask: True for valid positions, False for padded
+            attention_mask = ~attention_mask
+        else:
+            attention_mask = None
+            
+        x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, attention_mask))
         x = self.residual_connections[1](x, self.feed_forward_block)
         return x
+
 
 class Encoder(nn.Module):
     def __init__(self, layers: nn.ModuleList) -> None:
@@ -126,37 +146,43 @@ class Encoder(nn.Module):
         self.layers = layers
         self.norm = LayerNormalization()
 
-    def forward(self, x, mask):
+    def forward(self, x, src_key_padding_mask=None):
         for layer in self.layers:
-            x = layer(x, mask)
-        return self.norm(x) 
+            x = layer(x, src_key_padding_mask)
+        return self.norm(x)
+
     
 class ProjectionLayer(nn.Module):
-    def __init__(self, d_model: int):
+    def __init__(self, d_model: int, num_classes: int):
         super().__init__()
-        self.linear = nn.Linear(d_model, 1)
+        self.linear = nn.Linear(d_model, num_classes)
     
     def forward(self, x):
-        return torch.log_softmax(self.linear(x), dim=-1)
+        return self.linear(x)
     
 class Transformer(nn.Module):
-    def __init__(self, encoder: Encoder, src_pos: TemporalPositionalEncoding, projection_layer: ProjectionLayer):
+    def __init__(self, input_proj: InputProjection, encoder: Encoder, src_pos: TemporalPositionalEncoding, projection_layer: ProjectionLayer):
         super().__init__()
+        self.input_proj = input_proj
         self.encoder = encoder
         self.src_pos = src_pos
         self.projection_layer = projection_layer
 
-    def encode(self, src, src_mask):
-        src = self.src_pos(src)
-        return self.encoder(src, src_mask)
-        
+    def encode(self, src, src_key_padding_mask=None):
+        src = self.input_proj(src)  # Project 141 -> d_model
+        src = self.src_pos(src)           # Add positional encoding
+        return self.encoder(src, src_key_padding_mask)
+
     def project(self, x):
         return self.projection_layer(x)
     
-def build_transformer(src_seq_len: int, d_model: int = 256, N: int = 6, h: int = 8, dropout: float = 0.1, d_ff: int = 2048):
+def build_transformer(src_seq_len: int, hop_length: int, sample_rate: int, d_model: int, num_classes: int, n_bins: int, N: int = 6, h: int = 8, dropout: float = 0.1, d_ff: int = 2048):
+
+    # create input projection layer
+    input_proj = InputProjection(n_bins, d_model)
 
     # create positional encoding layers
-    src_pos = TemporalPositionalEncoding(d_model, src_seq_len, dropout)
+    src_pos = TemporalPositionalEncoding(d_model, src_seq_len, hop_length, sample_rate, dropout)
 
     # create encoder blocks
     encoder_blocks = []
@@ -168,9 +194,9 @@ def build_transformer(src_seq_len: int, d_model: int = 256, N: int = 6, h: int =
     
     encoder = Encoder(nn.ModuleList(encoder_blocks))
 
-    projection_layer = ProjectionLayer(d_model)
+    projection_layer = ProjectionLayer(d_model, num_classes)
 
-    transformer = Transformer(encoder, src_pos, projection_layer)
+    transformer = Transformer(input_proj, encoder, src_pos, projection_layer)
     
     for p in transformer.parameters():
         if p.dim() > 1:
