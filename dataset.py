@@ -66,20 +66,20 @@ class ChordMatchedDataset(Dataset):
     def normalize_audio_features(self, data):
         """
         Normalize audio features: mel bins, chroma bins, and onset strength
-        Input shape: (time_steps, 141) - 128 mel + 12 chroma + 1 onset
+        Input shape: (time_steps, 77) - 64 mel + 12 chroma + 1 onset
         """
         normalized_data = np.copy(data)
         
         # Mel bins (first 128 features): -80 to 0 → 0 to 1
-        normalized_data[:, :128] = (data[:, :128] + 80) / 80
+        normalized_data[:, :64] = (data[:, :64] + 80) / 80
         
         # Chroma bins (next 12 features): already 0 to 1, keep as is
         # normalized_data[:, 128:140] = data[:, 128:140]
         
         # Onset strength (last feature): log normalization
-        onset_data = data[:, 140]
+        onset_data = data[:, 76]
         onset_log = np.log1p(onset_data)
-        normalized_data[:, 140] = onset_log / (np.max(onset_log) + 1e-8)  # avoid division by zero
+        normalized_data[:, 76] = onset_log / (np.max(onset_log) + 1e-8)  # avoid division by zero
         
         return normalized_data
 
@@ -180,17 +180,17 @@ class ChordMatchedDataset(Dataset):
                 self.y.append(grp['targets'][:].tolist())
 
         
-"""if __name__ == "__main__":
+if __name__ == "__main__":
     mix_path = "dataset\\mixes"
     annotation_path = "dataset\\annotations"
-    sample_rate = 22050
+    sample_rate = 11025
     hop_length = 512
-    n_mels = 128
+    n_mels = 64
     n_fft = 2048
 
     dataset = ChordMatchedDataset(mix_path, annotation_path, sample_rate, hop_length, n_mels, n_fft)
     
     # Example usage
     for i in range(len(dataset)):
-        x, target = dataset[i]
-        print(f"Sample {i}: x shape: {x.shape}, target shape: {target.shape}")"""
+        example = dataset[i]
+        print(f"Sample {i}: x shape: {example["feature"].shape}, target shape: {example["target"].shape}")

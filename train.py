@@ -11,12 +11,12 @@ from tqdm import tqdm
 
 from pathlib import Path
 
-def get_model(device, src_seq_len, hop_length=512, sample_rate=22050, d_model=32, num_classes=24, n_bins=141):
+def get_model(device, src_seq_len, hop_length=512, sample_rate=11025, d_model=32, num_classes=24, n_bins=77):
     model = build_transformer(src_seq_len, hop_length, sample_rate, d_model, num_classes, n_bins)
     model.to(device)
     return model
 
-def get_ds(mix_path, annotation_path, batch_size=4, sample_rate=22050, hop_length=512, n_mels=128, n_fft=2048):
+def get_ds(mix_path, annotation_path, batch_size=4, sample_rate=11025, hop_length=512, n_mels=64, n_fft=2048):
     dataset = ChordMatchedDataset(mix_path, annotation_path, sample_rate, hop_length, n_mels, n_fft)
 
     train_ds_size = int(len(dataset) * 0.9)
@@ -29,6 +29,7 @@ def get_ds(mix_path, annotation_path, batch_size=4, sample_rate=22050, hop_lengt
     return dataset, train_dataloader, val_dataloader
 
 def train_model(mix_path="dataset\\mixes", annotation_path="dataset\\annotations", experiment_name="runs/music_transformer", num_epochs=2, lr=1e-4):
+    torch.cuda.empty_cache()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
