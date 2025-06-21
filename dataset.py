@@ -70,16 +70,16 @@ class ChordMatchedDataset(Dataset):
         """
         normalized_data = np.copy(data)
         
-        # Mel bins (first 128 features): -80 to 0 → 0 to 1
-        normalized_data[:, :64] = (data[:, :64] + 80) / 80
+        """# Mel bins (first 128 features): -80 to 0 → 0 to 1
+        normalized_data[:, :64] = (data[:, :64] + 80) / 80"""
         
         # Chroma bins (next 12 features): already 0 to 1, keep as is
         # normalized_data[:, 128:140] = data[:, 128:140]
         
         # Onset strength (last feature): log normalization
-        onset_data = data[:, 76]
+        onset_data = data[:, 12]
         onset_log = np.log1p(onset_data)
-        normalized_data[:, 76] = onset_log / (np.max(onset_log) + 1e-8)  # avoid division by zero
+        normalized_data[:, 12] = onset_log / (np.max(onset_log) + 1e-8)  # avoid division by zero
         
         return normalized_data
 
@@ -120,20 +120,13 @@ class ChordMatchedDataset(Dataset):
             try:
                 audio, _ = librosa.load(audio_path, sr=self.sample_rate)  # Fixed syntax
                 y_harm = librosa.effects.harmonic(y=audio, margin=8)
-                mel_spec = librosa.feature.melspectrogram(
-                        y=audio, 
-                        sr=self.sample_rate,
-                        n_mels=self.n_mels,
+                chroma = librosa.feature.chroma_cqt(y=y_harm, sr=self.sample_rate,
                         hop_length=self.hop_length,
-                        n_fft=self.n_fft
                 )
-                scaled_mel = librosa.power_to_db(mel_spec, ref=np.max)
-                transposed_mel = scaled_mel.T
-                chroma = librosa.feature.chroma_cqt(y=y_harm, sr=self.sample_rate)
                 transposed_chroma = chroma.T
-                onset_env = librosa.onset.onset_strength(y=audio, sr=self.sample_rate)
+                onset_env = librosa.onset.onset_strength(y=audio, sr=self.sample_rate, hop_length=self.hop_length)
                 onset_2d = [[elem] for elem in onset_env]
-                song_input = np.concatenate((transposed_mel, transposed_chroma, onset_2d), axis=1)
+                song_input = np.concatenate((transposed_chroma, onset_2d), axis=1)
                 
                 normalized_song_input = self.normalize_audio_features(song_input)
                 
@@ -184,7 +177,7 @@ if __name__ == "__main__":
     mix_path = "dataset\\mixes"
     annotation_path = "dataset\\annotations"
     sample_rate = 11025
-    hop_length = 512
+    hop_length = 1024
     n_mels = 64
     n_fft = 2048
 
