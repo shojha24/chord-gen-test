@@ -27,7 +27,7 @@ def run_validation(model, val_ds, device):
         for batch in tqdm(val_ds, desc="Validation", ncols=console_width):
             count += 1
             encoder_input = batch['feature'].to(device)  # (batch_size, seq_len, 141)
-            src_key_padding_mask = (encoder_input.abs().sum(dim=-1) == 0)  # (batch_size, seq_len)
+            src_key_padding_mask = batch['padding_mask'].to(device)  # (batch_size, seq_len)
 
             encoder_output = model.encode(encoder_input, src_key_padding_mask)
             logits = model.project(encoder_output)
@@ -86,8 +86,7 @@ def train_model(mix_path="dataset\\mixes", annotation_path="dataset\\annotations
             target = batch['target'].to(device)
             
             # Create padding mask - True for padded positions
-            # Check if entire feature vector is 0 (padded)
-            src_key_padding_mask = (encoder_input == 0).all(dim=-1)  # (batch_size, seq_len)
+            src_key_padding_mask = batch['padding_mask'].to(device)  # (batch_size, seq_len)
             
             # Pass the padding mask to the model
             encoder_output = model.encode(encoder_input, src_key_padding_mask)
