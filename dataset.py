@@ -8,13 +8,14 @@ import h5py
 import os
 
 class ChordMatchedDataset(Dataset):
-    def __init__(self, mix_path, annotation_path, sample_rate, hop_length, n_mels, n_fft, cache_path="dataset.hdf5"):
+    def __init__(self, mix_path, annotation_path, sample_rate, hop_length, n_mels, n_fft, n_files, cache_path="dataset.hdf5"):
         super().__init__()
         self.seq_len = 0
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.n_mels = n_mels
         self.n_fft = n_fft
+        self.n_files = n_files
         self.mix_path = mix_path
         self.annotation_data = annotation_path
         self.beatinfo_headers = ['Start time in seconds', 'Bar count', 'Quarter count', 'Chord name']
@@ -88,7 +89,7 @@ class ChordMatchedDataset(Dataset):
         y = []
         
         # Iterate through all files in the directory
-        for i in range(500):
+        for i in range(self.n_files):
             file_num = i + 1
             n_frames = 0
 
@@ -105,7 +106,7 @@ class ChordMatchedDataset(Dataset):
                 beatinfo_df.iat[j, 3] = beatinfo_df.iat[j, 3].replace("'", "")
                 if beatinfo_df.iat[j, 3] == "BASS_NOTE_EXCEPTION" or beatinfo_df.iat[j, 3] == "N.C.":
                     if j > 0:
-                        beatinfo_df.iat[j, 3] = beatinfo_df.iat[j-1, 3]
+                        beatinfo_df.iat[j, 3] = 24
                     else:
                         usable = False
                         break
@@ -180,8 +181,9 @@ if __name__ == "__main__":
     hop_length = 1024
     n_mels = 64
     n_fft = 2048
+    n_files = 1000
 
-    dataset = ChordMatchedDataset(mix_path, annotation_path, sample_rate, hop_length, n_mels, n_fft)
+    dataset = ChordMatchedDataset(mix_path, annotation_path, sample_rate, hop_length, n_mels, n_fft, n_files)
     
     # Example usage
     for i in range(len(dataset)):

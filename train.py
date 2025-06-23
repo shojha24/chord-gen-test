@@ -10,14 +10,45 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from pathlib import Path
+import os
 
-def get_model(device, src_seq_len, hop_length=1024, sample_rate=11025, d_model=32, num_classes=24, n_bins=13):
+def run_validation(model, val_ds, device):
+    model.eval()
+    count = 0
+
+    try:
+        with os.popen('stty size', 'r') as console:
+            _, console_width = console.read().split()
+            console_width = int(console_width)
+    except Exception as e:
+        console_width = 80 
+
+    with torch.no_grad():
+        for batch in tqdm(val_ds, desc="Validation", ncols=console_width):
+            count += 1
+            encoder_input = batch['feature'].to(device)  # (batch_size, seq_len, 141)
+            src_key_padding_mask = (encoder_input.abs().sum(dim=-1) == 0)  # (batch_size, seq_len)
+
+            encoder_output = model.encode(encoder_input, src_key_padding_mask)
+            logits = model.project(encoder_output)
+
+            # retrieve the predicted class with the highest probability
+            predicted_classes = torch.argmax(logits, dim=-1)
+            target = batch['target'].to(device)
+            target = target.view(-1)
+            predicted_classes = predicted_classes.view(-1)
+
+            print(f"{f'TARGET: ':>12}{target}")
+            print(f"{f'PREDICTED: ':>12}{predicted_classes}")     
+
+
+def get_model(device, src_seq_len, hop_length=1024, sample_rate=11025, d_model=16, num_classes=25, n_bins=13):
     model = build_transformer(src_seq_len, hop_length, sample_rate, d_model, num_classes, n_bins)
     model.to(device)
     return model
 
-def get_ds(mix_path, annotation_path, batch_size=4, sample_rate=11025, hop_length=1024, n_mels=64, n_fft=2048):
-    dataset = ChordMatchedDataset(mix_path, annotation_path, sample_rate, hop_length, n_mels, n_fft)
+def get_ds(mix_path, annotation_path, batch_size=4, sample_rate=11025, hop_length=1024, n_mels=64, n_fft=2048, n_files=1000):
+    dataset = ChordMatchedDataset(mix_path, annotation_path, sample_rate, hop_length, n_mels, n_fft, n_files)
 
     train_ds_size = int(len(dataset) * 0.9)
     val_ds_size = len(dataset) - train_ds_size
@@ -28,7 +59,7 @@ def get_ds(mix_path, annotation_path, batch_size=4, sample_rate=11025, hop_lengt
 
     return dataset, train_dataloader, val_dataloader
 
-def train_model(mix_path="dataset\\mixes", annotation_path="dataset\\annotations", experiment_name="runs/music_transformer", num_epochs=20, lr=1e-4):
+def train_model(mix_path="dataset\\mixes", annotation_path="dataset\\annotations", experiment_name="runs/music_transformer", num_epochs=20, lr=1e-4, num_classes=25):
     torch.cuda.empty_cache()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -55,14 +86,14 @@ def train_model(mix_path="dataset\\mixes", annotation_path="dataset\\annotations
             target = batch['target'].to(device)
             
             # Create padding mask - True for padded positions
-            # Check if entire feature vector is -1 (padded)
-            src_key_padding_mask = (encoder_input == -1).all(dim=-1)  # (batch_size, seq_len)
+            # Check if entire feature vector is 0 (padded)
+            src_key_padding_mask = (encoder_input == 0).all(dim=-1)  # (batch_size, seq_len)
             
             # Pass the padding mask to the model
             encoder_output = model.encode(encoder_input, src_key_padding_mask)
             logits = model.project(encoder_output)
 
-            loss = loss_fn(logits.view(-1, 24), target.view(-1))
+            loss = loss_fn(logits.view(-1, num_classes), target.view(-1))
             batch_iterator.set_postfix(loss=loss.item())
 
             writer.add_scalar('Loss/train', loss.item(), global_step)
@@ -73,6 +104,8 @@ def train_model(mix_path="dataset\\mixes", annotation_path="dataset\\annotations
             optimizer.zero_grad()
 
             global_step += 1
+
+        run_validation(model, val_dataloader, device)
 
         model_filename = f"music_models/epoch_{epoch + 1}.pt"
         torch.save({
