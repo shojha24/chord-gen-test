@@ -177,8 +177,8 @@ class ChordMatchedDataset(Dataset):
 if __name__ == "__main__":
     mix_path = "dataset\\mixes"
     annotation_path = "dataset\\annotations"
-    sample_rate = 11025
-    hop_length = 1024
+    sample_rate = 22050
+    hop_length = 2048
     n_mels = 64
     n_fft = 2048
     n_files = 1000
