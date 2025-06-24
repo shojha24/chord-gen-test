@@ -11,6 +11,7 @@ class ChordMatchedDataset(Dataset):
     def __init__(self, mix_path, annotation_path, sample_rate, hop_length, n_mels, n_fft, cache_path="dataset.hdf5"):
         super().__init__()
         self.seq_len = 0
+        self.tgt_len = 0
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.n_mels = n_mels
@@ -49,17 +50,25 @@ class ChordMatchedDataset(Dataset):
             pad_len = self.seq_len - len(x)
             # Use zeros for padding instead of -1
             x = np.pad(x, ((0, pad_len), (0, 0)), constant_values=0)
-            target = np.pad(target, (0, pad_len), constant_values=-1)  # Keep -1 for targets
+        
+        if len(target) < self.tgt_len:
+            pad_len = self.tgt_len - len(target)
+            target = np.pad(target, ((0, pad_len), (0, 0)), constant_values=-1)  # Keep -1 for targets
         
         # Create padding mask
-        is_padded = np.zeros(self.seq_len, dtype=bool)
+        feature_padded = np.zeros(self.seq_len, dtype=bool)
         if len(self.raw_X[idx]) < self.seq_len:
-            is_padded[len(self.raw_X[idx]):] = True
+            feature_padded[len(self.raw_X[idx]):] = True
+
+        target_padded = np.zeros(self.tgt_len, dtype=bool)
+        if len(self.y[idx]) < self.tgt_len:
+            target_padded[len(self.y[idx]):] = True
         
         return {
             "feature": torch.FloatTensor(x),
             "target": torch.LongTensor(target),
-            "padding_mask": torch.BoolTensor(is_padded)
+            "feature_mask": torch.BoolTensor(feature_padded),
+            "target_mask": torch.BoolTensor(target_padded)
         }
 
         
@@ -88,7 +97,7 @@ class ChordMatchedDataset(Dataset):
         y = []
         
         # Iterate through all files in the directory
-        for i in range(500):
+        for i in range(1000):
             file_num = i + 1
             n_frames = 0
 
@@ -137,15 +146,17 @@ class ChordMatchedDataset(Dataset):
             except Exception as e:
                 print(e)
 
-            # expand the chord list (n_beats) to match the length of the audio features (n_frames)
-            coarse_times = beatinfo_df['Start time in seconds'].astype(float).to_numpy()
-            fine_times = librosa.frames_to_time(np.arange(n_frames), sr=self.sample_rate, hop_length=self.hop_length)
-            chords = beatinfo_df['Chord name'].astype(int).to_numpy()
+            # condense the chord/time list; if a chord repeats for more than 1 beat, keep the first one
+            frames_to_times = librosa.frames_to_time(np.arange(n_frames), sr=self.sample_rate, hop_length=self.hop_length)
+            times = beatinfo_df['Start time in seconds'].astype(float).to_numpy().tolist()
+            # switch times in this array to the closest times in the frames
+            times = [float(frames_to_times[np.argmin(np.abs(frames_to_times - t))]) for t in times]
 
-            idx = np.searchsorted(coarse_times[1:], fine_times, side='right')
-            expanded_chords = chords[idx]
+            chords = beatinfo_df['Chord name'].astype(int).to_numpy().tolist()
+            chords_by_time = [[times[0], chords[0]]] + [[times[x], chords[x]] for x in range(1, len(times)) if chords[x] != chords[x - 1]]
+            self.tgt_len = max(self.tgt_len, len(chords_by_time))
 
-            y.append(expanded_chords.tolist())
+            y.append(chords_by_time)
 
             print(f"done with song {file_num}")
 
@@ -154,6 +165,7 @@ class ChordMatchedDataset(Dataset):
     def save_dataset_hdf5(self, filename):
         with h5py.File(filename, 'w') as f:
             f.attrs['seq_len'] = self.seq_len
+            f.attrs['tgt_len'] = self.tgt_len
             
             for i, (features, targets) in enumerate(zip(self.raw_X, self.y)):
                 grp = f.create_group(f'sample_{i}')
@@ -166,6 +178,7 @@ class ChordMatchedDataset(Dataset):
         
         with h5py.File(filename, 'r') as f:
             self.seq_len = f.attrs['seq_len']
+            self.tgt_len = f.attrs['tgt_len']
             
             for key in sorted(f.keys()):
                 grp = f[key]
@@ -187,3 +200,8 @@ if __name__ == "__main__":
     for i in range(len(dataset)):
         example = dataset[i]
         print(f"Sample {i}: x shape: {example["feature"].shape}, target shape: {example["target"].shape}")
+        if i == 984:
+            print(f"""Feature: {example['feature']}\n
+                  Target: {example['target'].numpy().tolist()}\n
+                  Feature mask: {example['feature_mask']}\n
+                  Target mask: {example['target_mask']}\n""")
