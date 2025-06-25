@@ -27,9 +27,8 @@ def run_validation(model, val_ds, device):
         for batch in tqdm(val_ds, desc="Validation", ncols=console_width):
             count += 1
             encoder_input = batch['feature'].to(device)  # (batch_size, seq_len, 141)
-            src_key_padding_mask = batch['padding_mask'].to(device)  # (batch_size, seq_len)
 
-            encoder_output = model.encode(encoder_input, src_key_padding_mask)
+            encoder_output = model.encode(encoder_input)
             logits = model.project(encoder_output)
 
             # retrieve the predicted class with the highest probability
@@ -77,34 +76,62 @@ def train_model(mix_path="dataset\\mixes", annotation_path="dataset\\annotations
     global_step = 0
     loss_fn = nn.CrossEntropyLoss(ignore_index=-1, label_smoothing=0.1).to(device)
 
+    # Enable anomaly detection
+    torch.autograd.set_detect_anomaly(True)
+    
     for epoch in range(initial_epoch, num_epochs):
         batch_iterator = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}")
         for batch in batch_iterator:
             model.train()
 
-            encoder_input = batch['feature'].to(device)  # (batch_size, seq_len, 141)
+            encoder_input = batch['feature'].to(device)
             target = batch['target'].to(device)
             
-            # Create padding mask - True for padded positions
-            src_key_padding_mask = batch['padding_mask'].to(device)  # (batch_size, seq_len)
+            # Check for NaN in input data
+            if torch.isnan(encoder_input).any():
+                print("NaN detected in encoder_input")
+                continue
+            if torch.isnan(target).any():
+                print("NaN detected in target")
+                continue
             
-            # Pass the padding mask to the model
-            encoder_output = model.encode(encoder_input, src_key_padding_mask)
+            encoder_output = model.encode(encoder_input)
+            
+            # Check encoder output
+            if torch.isnan(encoder_output).any():
+                print("NaN detected in encoder_output")
+                break
+                
             logits = model.project(encoder_output)
+            
+            # Check logits
+            if torch.isnan(logits).any():
+                print("NaN detected in logits")
+                break
 
             loss = loss_fn(logits.view(-1, num_classes), target.view(-1))
-            batch_iterator.set_postfix(loss=loss.item())
+            
+            # Check loss
+            if torch.isnan(loss):
+                print(f"NaN loss detected at step {global_step}")
+                print(f"Logits stats: min={logits.min()}, max={logits.max()}, mean={logits.mean()}")
+                print(f"Target stats: min={target.min()}, max={target.max()}")
+                break
 
+            batch_iterator.set_postfix(loss=loss.item())
             writer.add_scalar('Loss/train', loss.item(), global_step)
             writer.flush()
 
             loss.backward()
+            
+            # Add gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
             optimizer.zero_grad()
-
             global_step += 1
 
-        run_validation(model, val_dataloader, device)
+        #run_validation(model, val_dataloader, device)
 
         model_filename = f"music_models/epoch_{epoch + 1}.pt"
         torch.save({

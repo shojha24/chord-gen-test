@@ -141,23 +141,9 @@ class BiDirectionalAttentionBlock(nn.Module):
         batch_size, seq_len, _ = x.shape
         
         # Create causal masks
-        forward_causal = torch.tril(torch.ones(seq_len, seq_len, device=x.device))
-        backward_causal = torch.triu(torch.ones(seq_len, seq_len, device=x.device))
-        
-        # Combine with your input mask if provided
-        if input_mask is not None:
-            # input_mask shape: (batch_size, seq_len) - True for valid, False for padding
-            # Convert to attention mask format: (batch_size, 1, seq_len, seq_len)
-            expanded_mask = input_mask.unsqueeze(1).unsqueeze(2)  # (batch, 1, 1, seq_len)
-            expanded_mask = expanded_mask.expand(-1, -1, seq_len, -1)  # (batch, 1, seq_len, seq_len)
-            
-            # Combine causal and input masks
-            forward_mask = forward_causal.unsqueeze(0).unsqueeze(0) & expanded_mask
-            backward_mask = backward_causal.unsqueeze(0).unsqueeze(0) & expanded_mask
-        else:
-            forward_mask = forward_causal.unsqueeze(0).unsqueeze(0)
-            backward_mask = backward_causal.unsqueeze(0).unsqueeze(0)
-        
+        forward_mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool)).unsqueeze(0).unsqueeze(0)
+        backward_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool)).unsqueeze(0).unsqueeze(0)
+                
         # Apply attention in both directions
         forward_out = self.forward_attention(x, x, x, forward_mask)
         backward_out = self.backward_attention(x, x, x, backward_mask)
@@ -187,8 +173,8 @@ class BTCEncoderBlock(nn.Module):
             ResidualConnection(dropout)
         ])
 
-    def forward(self, x, src_key_padding_mask=None):
-        x = self.residual_connections[0](x, lambda x: self.bi_attention_block(x, src_key_padding_mask))
+    def forward(self, x):
+        x = self.residual_connections[0](x, lambda x: self.bi_attention_block(x))
         x = self.residual_connections[1](x, self.conv_block)
         return x
 
@@ -198,9 +184,9 @@ class Encoder(nn.Module):
         self.layers = layers
         self.norm = LayerNormalization()
 
-    def forward(self, x, src_key_padding_mask=None):
+    def forward(self, x):
         for layer in self.layers:
-            x = layer(x, src_key_padding_mask)
+            x = layer(x)
         return self.norm(x)
 
     
@@ -220,10 +206,10 @@ class Transformer(nn.Module):
         self.src_pos = src_pos
         self.projection_layer = projection_layer
 
-    def encode(self, src, src_key_padding_mask=None):
+    def encode(self, src):
         src = self.input_proj(src)  # Project 141 -> d_model
         src = self.src_pos(src)           # Add positional encoding
-        return self.encoder(src, src_key_padding_mask)
+        return self.encoder(src)
 
     def project(self, x):
         return self.projection_layer(x)
