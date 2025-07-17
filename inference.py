@@ -2,21 +2,60 @@ import warnings
 import torch
 import torch.nn as nn
 from torch.utils.data import random_split, Dataset, DataLoader
-from hmmlearn.hmm import MultinomialHMM
-
+from hmmlearn.hmm import CategoricalHMM
+import types
 from dataset import ChordMatchedDataset
 from model import build_transformer
-
+import requests # Add this import to fetch the JSON file
+import pretty_midi
+from midi2audio import FluidSynth
+from pydub import AudioSegment
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-
 from pathlib import Path
 import os
-
 import numpy as np
 import librosa
-
 import config
+import subprocess
+
+CHORD_TO_NOTES = {
+    "Cmaj": [60, 64, 67, 72],
+    "Cmin": [60, 63, 67, 72],
+    
+    "C#maj": [61, 65, 68, 73],
+    "C#min": [61, 64, 68, 73],
+    
+    "Dmaj": [62, 66, 69, 74],
+    "Dmin": [62, 65, 69, 74],
+    
+    "D#maj": [63, 67, 70, 75],
+    "D#min": [63, 66, 70, 75],
+    
+    "Emaj": [64, 68, 71, 76],
+    "Emin": [64, 67, 71, 76],
+    
+    "Fmaj": [65, 69, 72, 77],
+    "Fmin": [65, 68, 72, 77],
+    
+    "F#maj": [66, 70, 73, 78],
+    "F#min": [66, 69, 73, 78],
+    
+    "Gmaj": [67, 71, 74, 79],
+    "Gmin": [67, 70, 74, 79],
+    
+    "G#maj": [68, 72, 75, 80],
+    "G#min": [68, 71, 75, 80],
+    
+    "Amaj": [69, 73, 76, 81],
+    "Amin": [69, 72, 76, 81],
+    
+    "A#maj": [70, 74, 77, 82],
+    "A#min": [70, 73, 77, 82],
+    
+    "Bmaj": [71, 75, 78, 83],
+    "Bmin": [71, 74, 78, 83]
+}
 
 def process_audio(audio_path, sample_rate=config.SAMPLE_RATE, hop_length=config.HOP_LENGTH):
     # Load the audio file
@@ -116,62 +155,133 @@ def run_inference(model, audio_path, device):
     return full_logits.cpu(), original_song_len_frames
 
 
+def get_hmm_params_from_json(num_classes, chord_encodings, self_transition_prob=0.99):
+    """
+    Loads chord-to-chord transition data and adapts it for a frame-to-frame HMM
+    by injecting a high self-transition probability.
+    """
+    print(f"Loading HMM parameters...")
+    try:
+        url = "https://raw.githubusercontent.com/schollz/chords/master/chordIndexInC.json"
+        data = requests.get(url).json()
+
+        # Create reverse mapping from chord name to class index
+        inverted_encodings = {}
+        for idx, name in chord_encodings.items():
+            if name == 'N.C.': continue
+            json_name = name.replace("maj", "").replace("min", "m").replace("#", "b")
+            inverted_encodings[json_name] = idx
+        
+        # Initialize a chord-to-chord transition matrix with smoothing
+        chord_transition_matrix = np.full((num_classes, num_classes), 1e-6)
+        start_probs = np.full(num_classes, 1e-6)
+
+        # Populate the matrix using first-order transitions from the JSON
+        for from_chord_json, transitions in data.items():
+            if " " in from_chord_json or from_chord_json not in inverted_encodings:
+                continue
+            
+            from_idx = inverted_encodings[from_chord_json]
+            start_probs[from_idx] += sum(transitions.values())
+            
+            for to_chord_json, prob in transitions.items():
+                if to_chord_json in inverted_encodings:
+                    to_idx = inverted_encodings[to_chord_json]
+                    chord_transition_matrix[from_idx, to_idx] += prob
+
+        # Normalize the chord-to-chord matrix
+        row_sums = chord_transition_matrix.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1 # Avoid division by zero
+        chord_transition_matrix /= row_sums
+        
+        # Normalize start probabilities
+        start_probs /= start_probs.sum()
+
+        # --- Adapt the matrix for frame-to-frame transitions ---
+        print(f"Adapting for frame-based HMM with self-transition prob: {self_transition_prob}")
+        
+        # This is the probability of changing to *any* other chord
+        change_prob = 1.0 - self_transition_prob
+        
+        # Create the final frame-based transition matrix
+        frame_transition_matrix = np.zeros((num_classes, num_classes))
+
+        for i in range(num_classes):
+            # Get the relative probabilities of transitioning to *other* chords
+            off_diagonal_probs = np.copy(chord_transition_matrix[i, :])
+            off_diagonal_probs[i] = 0 # Ignore self-transition from the original matrix
+            
+            # Normalize the off-diagonal probabilities so they sum to 1
+            off_diagonal_sum = off_diagonal_probs.sum()
+            if off_diagonal_sum > 0:
+                normalized_off_diagonal = off_diagonal_probs / off_diagonal_sum
+            else:
+                # If no transitions are specified, default to uniform change probability
+                normalized_off_diagonal = np.full(num_classes, 1.0 / (num_classes - 1))
+                normalized_off_diagonal[i] = 0
+
+            # Distribute the small 'change_prob' according to these relative likelihoods
+            frame_transition_matrix[i, :] = normalized_off_diagonal * change_prob
+            
+            # Set the high probability of staying on the same chord
+            frame_transition_matrix[i, i] = self_transition_prob
+
+        print("Successfully initialized frame-based HMM transition matrix.")
+        return start_probs, frame_transition_matrix
+
+    except Exception as e:
+        print(f"Could not load HMM params: {e}. Falling back to uniform probabilities.")
+        # Fallback remains the same
+        transition_matrix = np.full((num_classes, num_classes), 1.0 / num_classes)
+        start_probs = np.full(num_classes, 1.0 / num_classes)
+        return start_probs, transition_matrix
+    
+
+# Replace the entire decode_chords_with_viterbi function with this version
 def decode_chords_with_viterbi(logits, song_len_frames, hop_length=config.HOP_LENGTH, sample_rate=config.SAMPLE_RATE):
     """
-    Decodes the most likely sequence of chords using Viterbi decoding.
+    Decodes the most likely sequence of chords using Viterbi decoding with CategoricalHMM.
     """
-    # 1. Emission Probabilities (from your model's output)
-    # Convert logits to probabilities using softmax
-    emission_probs = torch.nn.functional.softmax(logits, dim=1).numpy()
-
-    # 2. Transition Probabilities (can be learned or defined by theory)
-    # For now, let's create a simple one: high prob of staying on the same chord,
-    # and a small, uniform prob of transitioning to any other chord.
     num_classes = logits.shape[1]
-    transition_matrix = np.full((num_classes, num_classes), 0.01)
-    np.fill_diagonal(transition_matrix, 1 - (0.01 * (num_classes - 1)))
     
-    # Ensure rows sum to 1
-    transition_matrix /= transition_matrix.sum(axis=1, keepdims=True)
+    chord_encodings = {0: 'A#maj', 1: 'A#min', 2: 'Amaj', 3: 'Amin', 4: 'Bmaj', 5: 'Bmin', 6: 'C#maj', 7: 'C#min', 
+                       8: 'Cmaj', 9: 'Cmin', 10: 'D#maj', 11: 'D#min', 12: 'Dmaj', 13: 'Dmin', 14: 'Emaj', 15: 'Emin', 
+                       16: 'F#maj', 17: 'F#min', 18: 'Fmaj', 19: 'Fmin', 20: 'G#maj', 21: 'G#min', 22: 'Gmaj', 
+                       23: 'Gmin', 24: 'N.C.'} # Assuming 25th class is No Chord
 
-    # 3. Initial Probabilities (how likely is a song to start with each chord)
-    # Let's assume uniform for simplicity.
-    start_probs = np.full(num_classes, 1.0 / num_classes)
+    # 1. Get musically-informed HMM parameters
+    start_probs, transition_matrix = get_hmm_params_from_json(num_classes, chord_encodings, self_transition_prob=0.99)
 
-    # 4. Set up and run the HMM
-    hmm_model = MultinomialHMM(n_components=num_classes, n_iter=10)
+    # 2. Set up the HMM
+    hmm_model = CategoricalHMM(n_components=num_classes)
     hmm_model.startprob_ = start_probs
     hmm_model.transmat_ = transition_matrix
-    hmm_model.emissionprob_ = emission_probs.T # Note: hmmlearn expects (n_components, n_features), so we transpose
 
-    # HMM expects integer observations, not probabilities. A common workaround is to
-    # use the argmax as the observations for the Viterbi path finding.
-    observations = np.argmax(emission_probs, axis=1).reshape(-1, 1)
-    
-    log_prob, predicted_states = hmm_model.decode(observations, algorithm="viterbi")
+    # 3. Monkey-patch the HMM to use our neural network's emission probabilities
+    hmm_model.emissionprob_ = np.ones((num_classes, 1))
+    def custom_log_likelihood_computer(self, log_probs_from_nn):
+        return log_probs_from_nn
+    hmm_model._compute_log_likelihood = types.MethodType(custom_log_likelihood_computer, hmm_model)
+
+    # 4. Decode using the public API
+    log_probs = torch.nn.functional.log_softmax(logits, dim=1).numpy()
+    log_prob, predicted_states = hmm_model.decode(log_probs, algorithm="viterbi")
     
     print(f"HMM Log Probability: {log_prob}")
 
     # 5. Decode the predicted states into chord names
-    chord_encodings = {0: 'A#maj', 1: 'A#min', 2: 'Amaj', 3: 'Amin', 4: 'Bmaj', 5: 'Bmin', 6: 'C#maj', 7: 'C#min', 
-                        8: 'Cmaj', 9: 'Cmin', 10: 'D#maj', 11: 'D#min', 12: 'Dmaj', 13: 'Dmin', 14: 'Emaj', 15: 'Emin', 
-                        16: 'F#maj', 17: 'F#min', 18: 'Fmaj', 19: 'Fmin', 20: 'G#maj', 21: 'G#min', 22: 'Gmaj', 
-                        23: 'Gmin'} # (your encodings)
-    
-    # Group consecutive identical chords
-    chords_with_times = []
+    chords_with_times = [] # ... (rest of the function is identical)
     if len(predicted_states) > 0:
-        current_chord = chord_encodings[predicted_states[0]]
+        current_chord = chord_encodings.get(predicted_states[0], "N.C.")
         start_time = 0.0
         for i in range(1, len(predicted_states)):
             frame_time = i * hop_length / sample_rate
             if predicted_states[i] != predicted_states[i-1]:
                 end_time = frame_time
                 chords_with_times.append({'start': start_time, 'end': end_time, 'chord': current_chord})
-                current_chord = chord_encodings[predicted_states[i]]
+                current_chord = chord_encodings.get(predicted_states[i], "N.C.")
                 start_time = end_time
         
-        # Add the final chord
         end_time = song_len_frames * hop_length / sample_rate
         chords_with_times.append({'start': start_time, 'end': end_time, 'chord': current_chord})
 
@@ -180,15 +290,100 @@ def decode_chords_with_viterbi(logits, song_len_frames, hop_length=config.HOP_LE
         
     return chords_with_times
 
+def write_chords_to_midi(chords_with_times, output_path):
+    """
+    Writes the decoded chords to a MIDI file.
+    """
+    midi = pretty_midi.PrettyMIDI()
+    instrument = pretty_midi.Instrument(program=0)
+
+    for chord_info in chords_with_times:
+        start_time = chord_info['start']
+        end_time = chord_info['end']
+        chord_name = chord_info['chord']
+
+        if chord_name == 'N.C.':
+            continue  # Skip No Chord
+
+        # Convert chord name to MIDI pitch numbers
+        pitches = CHORD_TO_NOTES.get(chord_name, [])
+        notes = [pretty_midi.Note(velocity=100, pitch=pitch, start=start_time, end=end_time) for pitch in pitches]
+        
+        instrument.notes.extend(notes)
+
+    midi.instruments.append(instrument)
+    midi.write(output_path)
+    print(f"MIDI file written to {output_path}")
+
+
+def impose_midi_on_audio(midi_path, audio_path, sound_font_path, output_path="final_output.wav"):
+    """
+    Synthesizes a MIDI file to audio using a SoundFont and overlays it onto an existing audio file.
+    """
+    # Define a temporary path for the synthesized MIDI audio
+    temp_midi_audio_path = "temp_midi_audio.wav"
+
+    # 1. Synthesize the MIDI file to a WAV file
+    print(f"Synthesizing {midi_path} to {temp_midi_audio_path}...")
+    try:
+        subprocess.run(["fluidsynth", "-ni", "-F", temp_midi_audio_path, "-r", str(config.SAMPLE_RATE), sound_font_path, midi_path], check=True)
+        print(f"Successfully synthesized MIDI audio.")
+    except Exception as e:
+        print(f"Error during MIDI synthesis: {e}")
+        print("Please ensure the SoundFont file exists at the specified path and that FluidSynth is installed correctly.")
+        return
+
+    # 2. Load both the original audio and the new MIDI audio
+    try:
+        original_audio = AudioSegment.from_mp3(audio_path)
+        midi_audio = AudioSegment.from_wav(temp_midi_audio_path)
+    except Exception as e:
+        print(f"Error loading audio files: {e}")
+        print("Please ensure your original audio file is at the correct path and that you have ffmpeg installed for pydub to process MP3 files.")
+        return
+
+    # 3. Adjust volume and overlay the tracks
+    # Increase the volume of the MIDI chords and decrease the original audio
+    midi_audio += 8  # Boost MIDI audio volume
+    original_audio -= 4 # Slightly reduce original audio volume
+
+    # Ensure both files have the same duration by trimming the longer one
+    min_length = min(len(midi_audio), len(original_audio))
+    combined_audio = original_audio[:min_length].overlay(midi_audio[:min_length])
+
+    # 4. Export the final mixed audio
+    combined_audio.export(output_path, format="wav")
+    print(f"Final mixed audio file saved as {output_path}")
+    
+    # 5. Clean up the temporary file
+    if os.path.exists(temp_midi_audio_path):
+        os.remove(temp_midi_audio_path)
+        print(f"Removed temporary file: {temp_midi_audio_path}")
+
+
 # Finally, update the main block
 if __name__ == "__main__":
-    model_path = "music_models/epoch_3.pt"
+    # --- Configuration ---
+    sound_font_path = "FluidR3_GM.sf2" 
+    model_path = "music_models/epoch_10.pt"
     audio_path = "perfect.mp3"
+    final_output_path = "final_output.wav"
+    midi_output_path = "output.mid"
 
-    model, device = get_model(model_path)
+    # --- Execution ---
+    if not os.path.exists(sound_font_path):
+        print(f"ERROR: SoundFont file not found at '{sound_font_path}'. Please update the path.")
+    else:
+        model, device = get_model(model_path)
 
-    # run_inference now returns LOGITS
-    all_logits, song_len_frames = run_inference(model, audio_path, device)
-    
-    # Use the new Viterbi decoder
-    decoded_chords = decode_chords_with_viterbi(all_logits, song_len_frames)
+        # run_inference now returns LOGITS
+        all_logits, song_len_frames = run_inference(model, audio_path, device)
+        
+        # Use the new Viterbi decoder
+        decoded_chords = decode_chords_with_viterbi(all_logits, song_len_frames)
+
+        # Write the decoded chords to a MIDI file
+        write_chords_to_midi(decoded_chords, output_path=midi_output_path)
+
+        # Impose the MIDI on the original audio
+        impose_midi_on_audio(midi_output_path, audio_path, sound_font_path, output_path=final_output_path)

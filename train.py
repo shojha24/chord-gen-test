@@ -27,7 +27,7 @@ def run_validation(model, val_dataloader, device, loss_fn, num_classes):
             mask = batch['mask'].to(device)  # Don't forget the mask here too!
 
             # Forward pass
-            encoder_output = model.encode(encoder_input, src_key_padding_mask=~mask)
+            encoder_output = model.encode(encoder_input, src_key_padding_mask=mask)
             logits = model.project(encoder_output)
             
             # Calculate loss (ignoring padding)
