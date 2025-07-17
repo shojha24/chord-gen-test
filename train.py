@@ -14,33 +14,41 @@ import os
 
 import config
 
-def run_validation(model, val_ds, device):
+def run_validation(model, val_dataloader, device, loss_fn, num_classes):
     model.eval()
-    count = 0
-
-    try:
-        with os.popen('stty size', 'r') as console:
-            _, console_width = console.read().split()
-            console_width = int(console_width)
-    except Exception as e:
-        console_width = 80 
+    total_loss = 0
+    total_correct = 0
+    total_samples = 0
 
     with torch.no_grad():
-        for batch in tqdm(val_ds, desc="Validation", ncols=console_width):
-            count += 1
-            encoder_input = batch['feature'].to(device)  # (batch_size, seq_len, 141)
-
-            encoder_output = model.encode(encoder_input)
-            logits = model.project(encoder_output)
-
-            # retrieve the predicted class with the highest probability
-            predicted_classes = torch.argmax(logits, dim=-1)
+        for batch in tqdm(val_dataloader, desc="Validation"):
+            encoder_input = batch['feature'].to(device)
             target = batch['target'].to(device)
-            target = target.view(-1)
-            predicted_classes = predicted_classes.view(-1)
+            mask = batch['mask'].to(device)  # Don't forget the mask here too!
 
-            print(f"{f'TARGET: ':>12}{target}")
-            print(f"{f'PREDICTED: ':>12}{predicted_classes}")     
+            # Forward pass
+            encoder_output = model.encode(encoder_input, src_key_padding_mask=~mask)
+            logits = model.project(encoder_output)
+            
+            # Calculate loss (ignoring padding)
+            loss = loss_fn(logits.view(-1, num_classes), target.view(-1))
+            total_loss += loss.item() * encoder_input.size(0) # Multiply by batch size
+
+            # Calculate accuracy (ignoring padding)
+            predicted_classes = torch.argmax(logits, dim=-1)
+            
+            # Only compare where the target is not the ignore_index (-1)
+            valid_preds = predicted_classes[target != -1]
+            valid_targets = target[target != -1]
+            
+            total_correct += (valid_preds == valid_targets).sum().item()
+            total_samples += valid_targets.numel()
+
+    avg_loss = total_loss / len(val_dataloader.dataset)
+    accuracy = total_correct / total_samples
+    print(f"Validation Loss: {avg_loss:.4f}, Validation Accuracy: {accuracy:.4f}")
+    return avg_loss, accuracy
+ 
 
 
 def get_model(device, src_seq_len, hop_length=config.HOP_LENGTH, sample_rate=config.SAMPLE_RATE, d_model=config.D_MODEL, num_classes=config.NUM_CLASSES, n_bins=config.N_BINS):
@@ -74,6 +82,7 @@ def train_model(mix_path="dataset\\mixes", annotation_path="dataset\\annotations
 
     writer = SummaryWriter(experiment_name)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
     initial_epoch = 0
     global_step = 0
     loss_fn = nn.CrossEntropyLoss(ignore_index=-1, label_smoothing=0.1).to(device)
@@ -88,6 +97,7 @@ def train_model(mix_path="dataset\\mixes", annotation_path="dataset\\annotations
 
             encoder_input = batch['feature'].to(device)
             target = batch['target'].to(device)
+            mask = batch['mask'].to(device)
             
             # Check for NaN in input data
             if torch.isnan(encoder_input).any():
@@ -97,7 +107,7 @@ def train_model(mix_path="dataset\\mixes", annotation_path="dataset\\annotations
                 print("NaN detected in target")
                 continue
             
-            encoder_output = model.encode(encoder_input)
+            encoder_output = model.encode(encoder_input, src_key_padding_mask=mask)
             
             # Check encoder output
             if torch.isnan(encoder_output).any():
@@ -133,7 +143,13 @@ def train_model(mix_path="dataset\\mixes", annotation_path="dataset\\annotations
             optimizer.zero_grad()
             global_step += 1
 
-        #run_validation(model, val_dataloader, device)
+        # ... inside the epoch loop, after validation
+        val_loss, val_acc = run_validation(model, val_dataloader, device, loss_fn, config.NUM_CLASSES) # Assumes run_validation returns metrics
+        writer.add_scalar('Loss/validation', val_loss, global_step)
+        writer.add_scalar('Accuracy/validation', val_acc, global_step)
+
+        # Step the scheduler based on the validation loss
+        scheduler.step(val_loss) 
 
         model_filename = f"music_models/epoch_{epoch + 1}.pt"
         torch.save({

@@ -65,27 +65,6 @@ class FeedForwardBlock(nn.Module):
     def forward(self, x):
         return self.linear2(self.dropout(torch.relu(self.linear1(x))))
     
-class PositionWiseConvBlock(nn.Module):
-    def __init__(self, d_model: int, kernel_size: int = 3, n_conv_layers: int = 2, dropout: float = 0.1):
-        super().__init__()
-        
-        conv_layers = []
-        for _ in range(n_conv_layers):
-            conv_layers.extend([
-                nn.Conv1d(d_model, d_model, kernel_size, padding=kernel_size//2),
-                nn.ReLU(),
-                nn.Dropout(dropout)
-            ])
-        
-        self.conv_layers = nn.Sequential(*conv_layers)
-        
-    def forward(self, x):
-        # x shape: (batch_size, seq_len, d_model)
-        # Conv1d expects: (batch_size, d_model, seq_len)
-        x = x.transpose(1, 2)
-        x = self.conv_layers(x)
-        return x.transpose(1, 2)  # Back to (batch_size, seq_len, d_model)
-    
 class MultiHeadAttentionBlock(nn.Module):
 
     def __init__(self, d_model: int, h: int, dropout: float):
@@ -105,7 +84,7 @@ class MultiHeadAttentionBlock(nn.Module):
         d_k = query.shape[-1]
         attention_scores = (query @ key.transpose(-2, -1)) / (d_k ** 0.5)  # (batch_size, h, seq_len_q, seq_len_k)
         if mask is not None:
-            attention_scores.masked_fill_(mask == 0, float('-inf'))
+            attention_scores.masked_fill_(mask, float('-inf'))
         attention_scores = attention_scores.softmax(dim=-1)
         if dropout is not None:
             attention_scores = dropout(attention_scores)
@@ -127,32 +106,6 @@ class MultiHeadAttentionBlock(nn.Module):
 
         return self.linear_out(x)
     
-class BiDirectionalAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, h: int, dropout: float):
-        super().__init__()
-        self.d_model = d_model
-        self.h = h
-        
-        self.forward_attention = MultiHeadAttentionBlock(d_model, h, dropout)
-        self.backward_attention = MultiHeadAttentionBlock(d_model, h, dropout)
-        self.output_projection = nn.Linear(d_model * 2, d_model)
-        
-    def forward(self, x, input_mask=None):
-        batch_size, seq_len, _ = x.shape
-        
-        # Create causal masks
-        forward_mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool)).unsqueeze(0).unsqueeze(0)
-        backward_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool)).unsqueeze(0).unsqueeze(0)
-                
-        # Apply attention in both directions
-        forward_out = self.forward_attention(x, x, x, forward_mask)
-        backward_out = self.backward_attention(x, x, x, backward_mask)
-        
-        # Concatenate and project
-        combined = torch.cat([forward_out, backward_out], dim=-1)
-        return self.output_projection(combined)
-
-    
 class ResidualConnection(nn.Module):
     def __init__(self, dropout: float):
         super().__init__()
@@ -162,21 +115,28 @@ class ResidualConnection(nn.Module):
     def forward(self, x, sublayer):
         return x + self.dropout(sublayer(self.norm(x)))
     
-class BTCEncoderBlock(nn.Module):
-    def __init__(self, bi_attention_block: BiDirectionalAttentionBlock, 
-                 conv_block: PositionWiseConvBlock, dropout: float):
+class EncoderBlock(nn.Module):
+    def __init__(self, self_attention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float):
         super().__init__()
-        self.bi_attention_block = bi_attention_block
-        self.conv_block = conv_block
+        self.self_attention_block = self_attention_block
+        self.feed_forward_block = feed_forward_block
         self.residual_connections = nn.ModuleList([
             ResidualConnection(dropout),
             ResidualConnection(dropout)
         ])
 
-    def forward(self, x):
-        x = self.residual_connections[0](x, lambda x: self.bi_attention_block(x))
-        x = self.residual_connections[1](x, self.conv_block)
+    def forward(self, x, src_key_padding_mask=None):
+        # Convert padding mask to attention mask format if needed
+        if src_key_padding_mask is not None:
+            # Convert (batch_size, seq_len) to (batch_size, 1, 1, seq_len) for attention
+            attention_mask = src_key_padding_mask.unsqueeze(1).unsqueeze(2)
+        else:
+            attention_mask = None
+            
+        x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, attention_mask))
+        x = self.residual_connections[1](x, self.feed_forward_block)
         return x
+
 
 class Encoder(nn.Module):
     def __init__(self, layers: nn.ModuleList) -> None:
@@ -184,9 +144,9 @@ class Encoder(nn.Module):
         self.layers = layers
         self.norm = LayerNormalization()
 
-    def forward(self, x):
+    def forward(self, x, src_key_padding_mask=None):
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x, src_key_padding_mask)
         return self.norm(x)
 
     
@@ -206,15 +166,17 @@ class Transformer(nn.Module):
         self.src_pos = src_pos
         self.projection_layer = projection_layer
 
-    def encode(self, src):
+    def encode(self, src, src_key_padding_mask=None):
         src = self.input_proj(src)  # Project 141 -> d_model
         src = self.src_pos(src)           # Add positional encoding
-        return self.encoder(src)
+        return self.encoder(src, src_key_padding_mask)
 
     def project(self, x):
         return self.projection_layer(x)
     
-def build_transformer(src_seq_len: int, hop_length: int, sample_rate: int, d_model: int, num_classes: int, n_bins: int, N: int = 6, h: int = 8, dropout: float = 0.1, n_conv_layers: int = 2,  kernel_size: int = 3):
+def build_transformer(src_seq_len: int, hop_length: int, sample_rate: int, d_model: int, num_classes: int, n_bins: int, N: int = 6, h: int = 8, dropout: float = 0.1, d_ff: int = 0):
+    if d_ff == 0:
+        d_ff = 4 * d_model  # Default value for feed-forward dimension
 
     # create input projection layer
     input_proj = InputProjection(n_bins, d_model)
@@ -225,9 +187,9 @@ def build_transformer(src_seq_len: int, hop_length: int, sample_rate: int, d_mod
     # create encoder blocks
     encoder_blocks = []
     for _ in range(N):
-        bi_attention_block = BiDirectionalAttentionBlock(d_model, h, dropout)
-        conv_block = PositionWiseConvBlock(d_model, kernel_size, n_conv_layers, dropout)
-        encoder_block = BTCEncoderBlock(bi_attention_block, conv_block, dropout)
+        encoder_self_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
+        encoder_block = EncoderBlock(encoder_self_attention_block, feed_forward_block, dropout)
         encoder_blocks.append(encoder_block)
     
     encoder = Encoder(nn.ModuleList(encoder_blocks))

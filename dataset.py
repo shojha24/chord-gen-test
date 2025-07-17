@@ -51,8 +51,8 @@ class ChordMatchedDataset(Dataset):
         target = np.array(self.y[idx])
 
         # Get the mask for x and target; the target is padded with -1 and the length of the mask is the same as x
-        mask = np.ones(x.shape[0], dtype=bool)
-        mask[target == -1] = False
+        mask = np.zeros(x.shape[0], dtype=bool)
+        mask[target == -1] = True
         
         return {
             "feature": torch.FloatTensor(x),

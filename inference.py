@@ -2,6 +2,7 @@ import warnings
 import torch
 import torch.nn as nn
 from torch.utils.data import random_split, Dataset, DataLoader
+from hmmlearn.hmm import MultinomialHMM
 
 from dataset import ChordMatchedDataset
 from model import build_transformer
@@ -45,7 +46,7 @@ def get_model(model_path):
     print(f"Using device: {device}")
 
     # Load the model
-    model = build_transformer(src_seq_len=107, hop_length=2048, sample_rate=22050, d_model=16, num_classes=25, n_bins=13)
+    model = build_transformer(src_seq_len=config.SEQ_LEN_FRAMES, hop_length=config.HOP_LENGTH, sample_rate=config.SAMPLE_RATE, d_model=config.D_MODEL, num_classes=config.NUM_CLASSES, n_bins=config.N_BINS)
 
     checkpoint = torch.load(model_path)
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -54,113 +55,140 @@ def get_model(model_path):
 
     return model, device
 
-def sliding_window_and_padding(song_input, max_seq_len, hop_length, sample_rate):
+# In inference.py, replace sliding_window_and_padding
+def create_inference_segments(song_input, seq_len):
     """
-    input dict format:
-    {
-        1: {
-            "timeframe": [0, 1976 * 1024 / 11025]  # timeframes in seconds
-            "input": np.array([[...], [...], ...])  # shape (1976, 13)
-        },
-        2: {
-            "timeframe": [0.5 * 1976 * 1024 / 11025, 1.5 * 1976 * 1024 / 11025]
-            "input": np.array([[...], [...], ...])  # shape (1976, 13)
-        },
-        ...
-        n: {
-            "timeframe": [n * 1976 * 1024 / 11025, end of song]
-            "input": np.array([[...], [...], ...])  # shape (1976, 13), including padding
-        }
-    }
+    Takes a full song input and splits it into segments of seq_len,
+    padding the last segment if necessary.
+    Returns a list of segments and their corresponding padding masks.
     """
-
-    input_dict = {}
     song_len = song_input.shape[0]
+    segments = []
+    masks = []
 
-    if song_len > max_seq_len:
-        # Use sliding window if it's longer than max_seq_len
-        num_windows = song_len // config.SEQ_LEN_FRAMES
-        for i in range(num_windows):
-            start = i * config.SEQ_LEN_FRAMES
-            end = (i + 1) * config.SEQ_LEN_FRAMES
+    for i in range(0, song_len, seq_len):
+        segment = song_input[i:i + seq_len]
+        current_len = segment.shape[0]
+        
+        # Create the padding mask (True for padded positions)
+        mask = torch.zeros(seq_len, dtype=torch.bool)
+        if current_len < seq_len:
+            pad_len = seq_len - current_len
+            padding = np.zeros((pad_len, song_input.shape[1]))
+            segment = np.vstack((segment, padding))
+            mask[current_len:] = True
 
-            input_dict[i + 1] = {
-                "timeframe": [start * config.HOP_LENGTH / config.SAMPLE_RATE, end * config.HOP_LENGTH / config.SAMPLE_RATE],
-                "input": song_input[start:end, :]
-            }
-        input_dict[num_windows + 1] = {
-            "timeframe": [(song_len - 107) * config.HOP_LENGTH / config.SAMPLE_RATE, song_len * config.HOP_LENGTH / config.SAMPLE_RATE],
-            "input": song_input[song_len - 107:song_len, :]
-        }
-    else:
-        if song_len < max_seq_len:
-            # Pad the input if it's shorter than max_seq_len
-            padding = np.zeros((max_seq_len - song_input.shape[0], song_input.shape[1]))
-            song_input = np.vstack((song_input, padding))
-        input_dict[1] = {
-            "timeframe": [0, song_len * hop_length / sample_rate],
-            "input": song_input
-        }
-    
-    return input_dict
+        segments.append(segment)
+        masks.append(mask)
+
+    return torch.tensor(np.array(segments), dtype=torch.float32), torch.stack(masks)
 
 
+# In inference.py, replace run_inference
 def run_inference(model, audio_path, device):
     # Process the audio file
     song_input = process_audio(audio_path)
+    original_song_len_frames = song_input.shape[0]
     print(f"Processed input shape: {song_input.shape}")
 
-    input_segments = sliding_window_and_padding(song_input, max_seq_len=config.SEQ_LEN_FRAMES, hop_length=config.HOP_LENGTH, sample_rate=config.SAMPLE_RATE)
+    # Use the new, clean segmentation function
+    input_segments, padding_masks = create_inference_segments(song_input, config.SEQ_LEN_FRAMES)
+    input_segments = input_segments.to(device)
+    padding_masks = padding_masks.to(device)
+    
+    print(f"Input segments shape: {input_segments.shape}")
 
-    print(f"Input segments: {len(input_segments)} segments")
+    all_logits = []
+    with torch.no_grad():
+        for i in range(input_segments.size(0)):
+            segment = input_segments[i].unsqueeze(0)  # Add batch dim
+            mask = padding_masks[i].unsqueeze(0)      # Add batch dim
 
-    predicted_classes = torch.tensor([], dtype=torch.long).to(device)
-
-    for segment_id, segment in input_segments.items():
-        print(f"Segment {segment_id} timeframe: {segment['timeframe']}, input shape: {segment['input'].shape}")
-        seg_input = torch.tensor(segment['input'], dtype=torch.float32).unsqueeze(0).to(device)  # Add batch dimension
-
-        # Run the model
-        with torch.no_grad():
-            encoder_output = model.encode(seg_input)
+            # Pass the segment AND the mask to the model
+            encoder_output = model.encode(segment, src_key_padding_mask=mask)
             logits = model.project(encoder_output)
+            all_logits.append(logits)
 
-            # Retrieve the predicted class with the highest probability and append to predicted classes tensor
-            segment_predicted_classes = torch.argmax(logits, dim=-1)
-            predicted_classes = torch.cat((predicted_classes, segment_predicted_classes), dim=1)
+    # Concatenate logits from all segments and trim to original song length
+    full_logits = torch.cat(all_logits, dim=1).squeeze(0) # (total_frames, num_classes)
+    full_logits = full_logits[:original_song_len_frames, :]
+    
+    return full_logits.cpu(), original_song_len_frames
 
-    return predicted_classes.cpu().numpy()[0], song_input.shape[0]  # Return predicted classes and song length in seconds
 
-def decode_chords(predicted_classes, song_len, hop_length=config.HOP_LENGTH, sample_rate=config.SAMPLE_RATE):
+def decode_chords_with_viterbi(logits, song_len_frames, hop_length=config.HOP_LENGTH, sample_rate=config.SAMPLE_RATE):
     """
-    Decode the predicted classes into chord names.
+    Decodes the most likely sequence of chords using Viterbi decoding.
     """
+    # 1. Emission Probabilities (from your model's output)
+    # Convert logits to probabilities using softmax
+    emission_probs = torch.nn.functional.softmax(logits, dim=1).numpy()
+
+    # 2. Transition Probabilities (can be learned or defined by theory)
+    # For now, let's create a simple one: high prob of staying on the same chord,
+    # and a small, uniform prob of transitioning to any other chord.
+    num_classes = logits.shape[1]
+    transition_matrix = np.full((num_classes, num_classes), 0.01)
+    np.fill_diagonal(transition_matrix, 1 - (0.01 * (num_classes - 1)))
+    
+    # Ensure rows sum to 1
+    transition_matrix /= transition_matrix.sum(axis=1, keepdims=True)
+
+    # 3. Initial Probabilities (how likely is a song to start with each chord)
+    # Let's assume uniform for simplicity.
+    start_probs = np.full(num_classes, 1.0 / num_classes)
+
+    # 4. Set up and run the HMM
+    hmm_model = MultinomialHMM(n_components=num_classes, n_iter=10)
+    hmm_model.startprob_ = start_probs
+    hmm_model.transmat_ = transition_matrix
+    hmm_model.emissionprob_ = emission_probs.T # Note: hmmlearn expects (n_components, n_features), so we transpose
+
+    # HMM expects integer observations, not probabilities. A common workaround is to
+    # use the argmax as the observations for the Viterbi path finding.
+    observations = np.argmax(emission_probs, axis=1).reshape(-1, 1)
+    
+    log_prob, predicted_states = hmm_model.decode(observations, algorithm="viterbi")
+    
+    print(f"HMM Log Probability: {log_prob}")
+
+    # 5. Decode the predicted states into chord names
     chord_encodings = {0: 'A#maj', 1: 'A#min', 2: 'Amaj', 3: 'Amin', 4: 'Bmaj', 5: 'Bmin', 6: 'C#maj', 7: 'C#min', 
-                   8: 'Cmaj', 9: 'Cmin', 10: 'D#maj', 11: 'D#min', 12: 'Dmaj', 13: 'Dmin', 14: 'Emaj', 15: 'Emin', 
-                   16: 'F#maj', 17: 'F#min', 18: 'Fmaj', 19: 'Fmin', 20: 'G#maj', 21: 'G#min', 22: 'Gmaj', 
-                   23: 'Gmin', 24: 'N.C.'}
-    chords = [chord_encodings[chord] for chord in predicted_classes]
-    times = [str(item) for item in np.linspace(0, song_len * hop_length / sample_rate, len(chords)).tolist()]
-    times_to_chords = dict(zip(times, chords))
+                        8: 'Cmaj', 9: 'Cmin', 10: 'D#maj', 11: 'D#min', 12: 'Dmaj', 13: 'Dmin', 14: 'Emaj', 15: 'Emin', 
+                        16: 'F#maj', 17: 'F#min', 18: 'Fmaj', 19: 'Fmin', 20: 'G#maj', 21: 'G#min', 22: 'Gmaj', 
+                        23: 'Gmin'} # (your encodings)
+    
+    # Group consecutive identical chords
+    chords_with_times = []
+    if len(predicted_states) > 0:
+        current_chord = chord_encodings[predicted_states[0]]
+        start_time = 0.0
+        for i in range(1, len(predicted_states)):
+            frame_time = i * hop_length / sample_rate
+            if predicted_states[i] != predicted_states[i-1]:
+                end_time = frame_time
+                chords_with_times.append({'start': start_time, 'end': end_time, 'chord': current_chord})
+                current_chord = chord_encodings[predicted_states[i]]
+                start_time = end_time
+        
+        # Add the final chord
+        end_time = song_len_frames * hop_length / sample_rate
+        chords_with_times.append({'start': start_time, 'end': end_time, 'chord': current_chord})
 
-    for i in range(1, len(chords)):
-        if chords[i] == chords[i - 1]:
-            times_to_chords.pop(times[i])
-            i -= 1
+    for item in chords_with_times:
+        print(f"Time: {item['start']:.2f}s - {item['end']:.2f}s, Chord: {item['chord']}")
+        
+    return chords_with_times
 
-    print(times_to_chords)
-    return times_to_chords
-
+# Finally, update the main block
 if __name__ == "__main__":
-    # Example usage
-    model_path = "music_models/epoch_3.pt"  # Path to your saved model
-    audio_path = "perfect.mp3"  # Path to your audio file
+    model_path = "music_models/epoch_3.pt"
+    audio_path = "perfect.mp3"
 
-    # Load the model
     model, device = get_model(model_path)
 
-    # Run inference
-    predicted_classes, song_len = run_inference(model, audio_path, device)
-    print(f"Predicted classes: {predicted_classes}")
-
-    decoded_chords = decode_chords(predicted_classes, song_len=song_len)
+    # run_inference now returns LOGITS
+    all_logits, song_len_frames = run_inference(model, audio_path, device)
+    
+    # Use the new Viterbi decoder
+    decoded_chords = decode_chords_with_viterbi(all_logits, song_len_frames)
