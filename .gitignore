@@ -6,3 +6,5 @@ runs
 opus_books_weights
 dataset
 dataset.hdf5
+music_models
+*.sf2

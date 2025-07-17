@@ -84,7 +84,7 @@ class MultiHeadAttentionBlock(nn.Module):
         d_k = query.shape[-1]
         attention_scores = (query @ key.transpose(-2, -1)) / (d_k ** 0.5)  # (batch_size, h, seq_len_q, seq_len_k)
         if mask is not None:
-            attention_scores.masked_fill_(mask == 0, float('-inf'))
+            attention_scores.masked_fill_(mask, float('-inf'))
         attention_scores = attention_scores.softmax(dim=-1)
         if dropout is not None:
             attention_scores = dropout(attention_scores)
@@ -130,8 +130,6 @@ class EncoderBlock(nn.Module):
         if src_key_padding_mask is not None:
             # Convert (batch_size, seq_len) to (batch_size, 1, 1, seq_len) for attention
             attention_mask = src_key_padding_mask.unsqueeze(1).unsqueeze(2)
-            # Invert mask: True for valid positions, False for padded
-            attention_mask = ~attention_mask
         else:
             attention_mask = None
             
@@ -176,7 +174,9 @@ class Transformer(nn.Module):
     def project(self, x):
         return self.projection_layer(x)
     
-def build_transformer(src_seq_len: int, hop_length: int, sample_rate: int, d_model: int, num_classes: int, n_bins: int, N: int = 6, h: int = 8, dropout: float = 0.1, d_ff: int = 2048):
+def build_transformer(src_seq_len: int, hop_length: int, sample_rate: int, d_model: int, num_classes: int, n_bins: int, N: int = 6, h: int = 8, dropout: float = 0.1, d_ff: int = 0):
+    if d_ff == 0:
+        d_ff = 4 * d_model  # Default value for feed-forward dimension
 
     # create input projection layer
     input_proj = InputProjection(n_bins, d_model)

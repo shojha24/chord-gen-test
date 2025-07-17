@@ -6,15 +6,20 @@ import librosa
 import pandas as pd
 import h5py
 import os
+import multiprocessing as mp
+from functools import partial
+import concurrent.futures
+import config
 
 class ChordMatchedDataset(Dataset):
-    def __init__(self, mix_path, annotation_path, sample_rate, hop_length, n_mels, n_fft, cache_path="dataset.hdf5"):
+    def __init__(self, mix_path, annotation_path, sample_rate, hop_length, n_mels, n_fft, n_files, cache_path="dataset.hdf5"):
         super().__init__()
-        self.seq_len = 0
+        self.seq_len = config.SEQ_LEN_FRAMES
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.n_mels = n_mels
         self.n_fft = n_fft
+        self.n_files = n_files
         self.mix_path = mix_path
         self.annotation_data = annotation_path
         self.beatinfo_headers = ['Start time in seconds', 'Bar count', 'Quarter count', 'Chord name']
@@ -34,7 +39,7 @@ class ChordMatchedDataset(Dataset):
         else:
             # Preprocess all data during initialization
             print("Preprocessing dataset...")
-            self.raw_X, self.y = self.preprocess_and_view()
+            self.raw_X, self.y = self.preprocess_and_view_parallel()
             print(f"Dataset loaded with {len(self.raw_X)} samples")
             self.save_dataset_hdf5(self.cache_path)
 
@@ -44,118 +49,127 @@ class ChordMatchedDataset(Dataset):
     def __getitem__(self, idx):
         x = np.array(self.raw_X[idx])
         target = np.array(self.y[idx])
-        
-        if len(x) < self.seq_len:
-            pad_len = self.seq_len - len(x)
-            # Use zeros for padding instead of -1
-            x = np.pad(x, ((0, pad_len), (0, 0)), constant_values=0)
-            target = np.pad(target, (0, pad_len), constant_values=-1)  # Keep -1 for targets
-        
-        # Create padding mask
-        is_padded = np.zeros(self.seq_len, dtype=bool)
-        if len(self.raw_X[idx]) < self.seq_len:
-            is_padded[len(self.raw_X[idx]):] = True
+
+        # Get the mask for x and target; the target is padded with -1 and the length of the mask is the same as x
+        mask = np.zeros(x.shape[0], dtype=bool)
+        mask[target == -1] = True
         
         return {
             "feature": torch.FloatTensor(x),
             "target": torch.LongTensor(target),
-            "padding_mask": torch.BoolTensor(is_padded)
+            "mask": torch.BoolTensor(mask)
         }
 
-        
-    def normalize_audio_features(self, data):
-        """
-        Normalize audio features: mel bins, chroma bins, and onset strength
-        Input shape: (time_steps, 77) - 64 mel + 12 chroma + 1 onset
-        """
-        normalized_data = np.copy(data)
-        
-        # Mel bins (first 128 features): -80 to 0 → 0 to 1
-        normalized_data[:, :64] = (data[:, :64] + 80) / 80
-        
-        # Chroma bins (next 12 features): already 0 to 1, keep as is
-        # normalized_data[:, 128:140] = data[:, 128:140]
-        
-        # Onset strength (last feature): log normalization
-        onset_data = data[:, 76]
-        onset_log = np.log1p(onset_data)
-        normalized_data[:, 76] = onset_log / (np.max(onset_log) + 1e-8)  # avoid division by zero
-        
-        return normalized_data
 
-    def preprocess_and_view(self):
-        raw_X = []
-        y = []
+    def process_single_file(self, file_num, mix_path, annotation_data, sample_rate, hop_length, 
+                        beatinfo_headers, inverted_encodings):
+        """Process a single audio file and return features and targets"""
         
-        # Iterate through all files in the directory
-        for i in range(500):
-            file_num = i + 1
-            n_frames = 0
-
-            beatinfo_path = os.path.join(self.annotation_data, f"{file_num :04d}_beatinfo.arff")
-            audio_path = os.path.join(self.mix_path, f"{file_num :04d}_mix.flac")
-
-            """This is for targets."""
+        beatinfo_path = os.path.join(annotation_data, f"{file_num:04d}_beatinfo.arff")
+        audio_path = os.path.join(mix_path, f"{file_num:04d}_mix.flac")
+        
+        # Check if files exist
+        if not (os.path.exists(beatinfo_path) and os.path.exists(audio_path)):
+            return None, None
+        
+        try:
+            # Process annotations
             beatinfo_df = pd.read_csv(beatinfo_path, comment="@", header=None)
-            beatinfo_df.columns = self.beatinfo_headers
-
-            usable = True
-
+            beatinfo_df.columns = beatinfo_headers
+            
+            # Clean chord names and encode
             for j in range(beatinfo_df.index.size):
                 beatinfo_df.iat[j, 3] = beatinfo_df.iat[j, 3].replace("'", "")
-                if beatinfo_df.iat[j, 3] == "BASS_NOTE_EXCEPTION" or beatinfo_df.iat[j, 3] == "N.C.":
+                if beatinfo_df.iat[j, 3] in ["BASS_NOTE_EXCEPTION", "N.C."]:
                     if j > 0:
-                        beatinfo_df.iat[j, 3] = beatinfo_df.iat[j-1, 3]
+                        beatinfo_df.iat[j, 3] = 24
                     else:
-                        usable = False
-                        break
+                        return None, None  # Skip unusable file
                 else:
-                    beatinfo_df.iat[j, 3] = self.inverted_encodings[beatinfo_df.iat[j, 3]]
+                    beatinfo_df.iat[j, 3] = inverted_encodings[beatinfo_df.iat[j, 3]]
+            
+            # Process audio
+            audio, _ = librosa.load(audio_path, sr=sample_rate)
+            y_harm = librosa.effects.harmonic(y=audio, margin=8)
+            chroma = librosa.feature.chroma_cqt(y=y_harm, sr=sample_rate, hop_length=hop_length)
+            onset_env = librosa.onset.onset_strength(y=audio, sr=sample_rate, hop_length=hop_length)
+            
+            # Combine features
+            song_input = np.concatenate((chroma.T, onset_env.reshape(-1, 1)), axis=1)
+            
+            # Normalize
+            normalized_song_input = self.normalize_audio_features_static(song_input)
+            
+            # Create segments; if total # of frames is not a multiple of segment length, pad w/ zeros
+            segment_length = config.SEQ_LEN_FRAMES
 
-            if not usable:
-                print(f"Skipping file {file_num} due to unusable annotations.")
-                continue
+            padding_length = segment_length - (len(normalized_song_input) % segment_length)
+            if padding_length == segment_length:
+                padding_length = 0 
+            
+            padded_normalized_song_input = np.pad(normalized_song_input, ((0, padding_length), (0, 0)), mode='constant')
 
-            """This is for features."""
-            try:
-                audio, _ = librosa.load(audio_path, sr=self.sample_rate)  # Fixed syntax
-                y_harm = librosa.effects.harmonic(y=audio, margin=8)
-                mel_spec = librosa.feature.melspectrogram(
-                        y=audio, 
-                        sr=self.sample_rate,
-                        n_mels=self.n_mels,
-                        hop_length=self.hop_length,
-                        n_fft=self.n_fft
-                )
-                scaled_mel = librosa.power_to_db(mel_spec, ref=np.max)
-                transposed_mel = scaled_mel.T
-                chroma = librosa.feature.chroma_cqt(y=y_harm, sr=self.sample_rate)
-                transposed_chroma = chroma.T
-                onset_env = librosa.onset.onset_strength(y=audio, sr=self.sample_rate)
-                onset_2d = [[elem] for elem in onset_env]
-                song_input = np.concatenate((transposed_mel, transposed_chroma, onset_2d), axis=1)
-                
-                normalized_song_input = self.normalize_audio_features(song_input)
-                
-                raw_X.append(normalized_song_input.tolist())
-                n_frames = len(normalized_song_input)
-                self.seq_len = max(self.seq_len, n_frames)
-                
-            except Exception as e:
-                print(e)
+            segments = [padded_normalized_song_input[i:i + segment_length] 
+                    for i in range(0, len(padded_normalized_song_input), segment_length)]
 
-            # expand the chord list (n_beats) to match the length of the audio features (n_frames)
+            # Expand chords to match audio frames
             coarse_times = beatinfo_df['Start time in seconds'].astype(float).to_numpy()
-            fine_times = librosa.frames_to_time(np.arange(n_frames), sr=self.sample_rate, hop_length=self.hop_length)
+            fine_times = librosa.frames_to_time(np.arange(len(normalized_song_input)), 
+                                            sr=sample_rate, hop_length=hop_length)
             chords = beatinfo_df['Chord name'].astype(int).to_numpy()
-
+            
             idx = np.searchsorted(coarse_times[1:], fine_times, side='right')
             expanded_chords = chords[idx]
 
-            y.append(expanded_chords.tolist())
+            # Pad expanded chords to match segment length
+            padded_expanded_chords = np.pad(expanded_chords, (0, padding_length), mode='constant', constant_values=-1)
 
-            print(f"done with song {file_num}")
+            chord_segments = [padded_expanded_chords[i:i + segment_length] 
+                            for i in range(0, len(padded_expanded_chords), segment_length)]
 
+            print(f"Processed file {file_num}: {len(segments)} segments, {len(chord_segments)} chord segments")
+            
+            return segments, chord_segments
+            
+        except Exception as e:
+            print(f"Error processing file {file_num}: {e}")
+            return None, None
+
+    def normalize_audio_features_static(self, data):
+        """Static version of normalize function for multiprocessing"""
+        normalized_data = np.copy(data)
+        onset_data = data[:, 12]
+        onset_log = np.log1p(onset_data)
+        normalized_data[:, 12] = onset_log / (np.max(onset_log) + 1e-8)
+        return normalized_data
+
+    def preprocess_and_view_parallel(self):
+        """Parallel version of preprocessing"""
+        raw_X = []
+        y = []
+        
+        # Create partial function with fixed arguments
+        process_func = partial(
+            self.process_single_file,
+            mix_path=self.mix_path,
+            annotation_data=self.annotation_data,
+            sample_rate=self.sample_rate,
+            hop_length=self.hop_length,
+            beatinfo_headers=self.beatinfo_headers,
+            inverted_encodings=self.inverted_encodings
+        )
+        
+        # Process files in parallel
+        with concurrent.futures.ProcessPoolExecutor(max_workers=mp.cpu_count()) as executor:
+            file_numbers = range(1, self.n_files + 1)
+            results = list(executor.map(process_func, file_numbers))
+        
+        # Collect results
+        for i, (segments, chord_segments) in enumerate(results):
+            if segments is not None and chord_segments is not None:
+                raw_X.extend(segments)
+                y.extend(chord_segments)
+        
         return raw_X, y
     
     def save_dataset_hdf5(self, filename):
@@ -183,13 +197,9 @@ class ChordMatchedDataset(Dataset):
 if __name__ == "__main__":
     mix_path = "dataset\\mixes"
     annotation_path = "dataset\\annotations"
-    sample_rate = 11025
-    hop_length = 512
-    n_mels = 64
-    n_fft = 2048
 
-    dataset = ChordMatchedDataset(mix_path, annotation_path, sample_rate, hop_length, n_mels, n_fft)
-    
+    dataset = ChordMatchedDataset(mix_path, annotation_path, config.SAMPLE_RATE, config.HOP_LENGTH, config.N_MELS, config.N_FFT, config.N_FILES)
+
     # Example usage
     for i in range(len(dataset)):
         example = dataset[i]
