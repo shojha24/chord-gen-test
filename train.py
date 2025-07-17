@@ -12,6 +12,8 @@ from tqdm import tqdm
 from pathlib import Path
 import os
 
+import config
+
 def run_validation(model, val_ds, device):
     model.eval()
     count = 0
@@ -41,12 +43,12 @@ def run_validation(model, val_ds, device):
             print(f"{f'PREDICTED: ':>12}{predicted_classes}")     
 
 
-def get_model(device, src_seq_len, hop_length=1024, sample_rate=11025, d_model=16, num_classes=25, n_bins=13):
+def get_model(device, src_seq_len, hop_length=config.HOP_LENGTH, sample_rate=config.SAMPLE_RATE, d_model=config.D_MODEL, num_classes=config.NUM_CLASSES, n_bins=config.N_BINS):
     model = build_transformer(src_seq_len, hop_length, sample_rate, d_model, num_classes, n_bins)
     model.to(device)
     return model
 
-def get_ds(mix_path, annotation_path, batch_size=4, sample_rate=11025, hop_length=1024, n_mels=64, n_fft=2048, n_files=1000):
+def get_ds(mix_path, annotation_path, batch_size=config.BATCH_SIZE, sample_rate=config.SAMPLE_RATE, hop_length=config.HOP_LENGTH, n_mels=config.N_MELS, n_fft=config.N_FFT, n_files=config.N_FILES):
     dataset = ChordMatchedDataset(mix_path, annotation_path, sample_rate, hop_length, n_mels, n_fft, n_files)
 
     train_ds_size = int(len(dataset) * 0.9)
@@ -58,7 +60,7 @@ def get_ds(mix_path, annotation_path, batch_size=4, sample_rate=11025, hop_lengt
 
     return dataset, train_dataloader, val_dataloader
 
-def train_model(mix_path="dataset\\mixes", annotation_path="dataset\\annotations", experiment_name="runs/music_transformer", num_epochs=20, lr=1e-4, num_classes=25):
+def train_model(mix_path="dataset\\mixes", annotation_path="dataset\\annotations", experiment_name="runs/music_transformer", num_epochs=config.NUM_EPOCHS, lr=config.LEARNING_RATE, num_classes=config.NUM_CLASSES):
     torch.cuda.empty_cache()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")

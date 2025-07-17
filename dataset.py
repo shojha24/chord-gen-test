@@ -9,11 +9,12 @@ import os
 import multiprocessing as mp
 from functools import partial
 import concurrent.futures
+import config
 
 class ChordMatchedDataset(Dataset):
     def __init__(self, mix_path, annotation_path, sample_rate, hop_length, n_mels, n_fft, n_files, cache_path="dataset.hdf5"):
         super().__init__()
-        self.seq_len = 0
+        self.seq_len = config.SEQ_LEN_FRAMES
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.n_mels = n_mels
@@ -49,13 +50,14 @@ class ChordMatchedDataset(Dataset):
         x = np.array(self.raw_X[idx])
         target = np.array(self.y[idx])
 
-        if len(x) < self.seq_len:
-            # dont return samples shorter than seq_len
-            return None
+        # Get the mask for x and target; the target is padded with -1 and the length of the mask is the same as x
+        mask = np.ones(x.shape[0], dtype=bool)
+        mask[target == -1] = False
         
         return {
             "feature": torch.FloatTensor(x),
             "target": torch.LongTensor(target),
+            "mask": torch.BoolTensor(mask)
         }
 
 
@@ -98,11 +100,18 @@ class ChordMatchedDataset(Dataset):
             # Normalize
             normalized_song_input = self.normalize_audio_features_static(song_input)
             
-            # Create segments
-            segment_length = int(10 * sample_rate / hop_length)
-            segments = [normalized_song_input[i:i + segment_length] 
-                    for i in range(0, len(normalized_song_input), segment_length)]
+            # Create segments; if total # of frames is not a multiple of segment length, pad w/ zeros
+            segment_length = config.SEQ_LEN_FRAMES
+
+            padding_length = segment_length - (len(normalized_song_input) % segment_length)
+            if padding_length == segment_length:
+                padding_length = 0 
             
+            padded_normalized_song_input = np.pad(normalized_song_input, ((0, padding_length), (0, 0)), mode='constant')
+
+            segments = [padded_normalized_song_input[i:i + segment_length] 
+                    for i in range(0, len(padded_normalized_song_input), segment_length)]
+
             # Expand chords to match audio frames
             coarse_times = beatinfo_df['Start time in seconds'].astype(float).to_numpy()
             fine_times = librosa.frames_to_time(np.arange(len(normalized_song_input)), 
@@ -111,10 +120,13 @@ class ChordMatchedDataset(Dataset):
             
             idx = np.searchsorted(coarse_times[1:], fine_times, side='right')
             expanded_chords = chords[idx]
-            
-            chord_segments = [expanded_chords[i:i + segment_length] 
-                            for i in range(0, len(expanded_chords), segment_length)]
-            
+
+            # Pad expanded chords to match segment length
+            padded_expanded_chords = np.pad(expanded_chords, (0, padding_length), mode='constant', constant_values=-1)
+
+            chord_segments = [padded_expanded_chords[i:i + segment_length] 
+                            for i in range(0, len(padded_expanded_chords), segment_length)]
+
             print(f"Processed file {file_num}: {len(segments)} segments, {len(chord_segments)} chord segments")
             
             return segments, chord_segments
@@ -157,8 +169,6 @@ class ChordMatchedDataset(Dataset):
             if segments is not None and chord_segments is not None:
                 raw_X.extend(segments)
                 y.extend(chord_segments)
-
-        self.seq_len = max(len(segment) for segment in raw_X)
         
         return raw_X, y
     
@@ -180,8 +190,6 @@ class ChordMatchedDataset(Dataset):
             
             for key in sorted(f.keys()):
                 grp = f[key]
-                if (len(grp['features'][:].tolist()) < self.seq_len):
-                    continue
                 self.raw_X.append(grp['features'][:].tolist())
                 self.y.append(grp['targets'][:].tolist())
 
@@ -189,14 +197,9 @@ class ChordMatchedDataset(Dataset):
 if __name__ == "__main__":
     mix_path = "dataset\\mixes"
     annotation_path = "dataset\\annotations"
-    sample_rate = 22050
-    hop_length = 2048
-    n_mels = 64
-    n_fft = 2048
-    n_files = 1000
 
-    dataset = ChordMatchedDataset(mix_path, annotation_path, sample_rate, hop_length, n_mels, n_fft, n_files)
-    
+    dataset = ChordMatchedDataset(mix_path, annotation_path, config.SAMPLE_RATE, config.HOP_LENGTH, config.N_MELS, config.N_FFT, config.N_FILES)
+
     # Example usage
     for i in range(len(dataset)):
         example = dataset[i]

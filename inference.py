@@ -15,7 +15,9 @@ import os
 import numpy as np
 import librosa
 
-def process_audio(audio_path, sample_rate=11025, hop_length=1024):
+import config
+
+def process_audio(audio_path, sample_rate=config.SAMPLE_RATE, hop_length=config.HOP_LENGTH):
     # Load the audio file
     y, sr = librosa.load(audio_path, sr=sample_rate)
     y_harm = librosa.effects.hpss(y)[0]  # Harmonic component
@@ -77,17 +79,17 @@ def sliding_window_and_padding(song_input, max_seq_len, hop_length, sample_rate)
 
     if song_len > max_seq_len:
         # Use sliding window if it's longer than max_seq_len
-        num_windows = song_len // 107
+        num_windows = song_len // config.SEQ_LEN_FRAMES
         for i in range(num_windows):
-            start = i * 107
-            end = (i + 1) * 107
+            start = i * config.SEQ_LEN_FRAMES
+            end = (i + 1) * config.SEQ_LEN_FRAMES
 
             input_dict[i + 1] = {
-                "timeframe": [start * hop_length / sample_rate, end * hop_length / sample_rate],
+                "timeframe": [start * config.HOP_LENGTH / config.SAMPLE_RATE, end * config.HOP_LENGTH / config.SAMPLE_RATE],
                 "input": song_input[start:end, :]
             }
         input_dict[num_windows + 1] = {
-            "timeframe": [(song_len - 107) * hop_length / sample_rate, song_len * hop_length / sample_rate],
+            "timeframe": [(song_len - 107) * config.HOP_LENGTH / config.SAMPLE_RATE, song_len * config.HOP_LENGTH / config.SAMPLE_RATE],
             "input": song_input[song_len - 107:song_len, :]
         }
     else:
@@ -108,7 +110,7 @@ def run_inference(model, audio_path, device):
     song_input = process_audio(audio_path)
     print(f"Processed input shape: {song_input.shape}")
 
-    input_segments = sliding_window_and_padding(song_input, max_seq_len=107, hop_length=2048, sample_rate=22050)
+    input_segments = sliding_window_and_padding(song_input, max_seq_len=config.SEQ_LEN_FRAMES, hop_length=config.HOP_LENGTH, sample_rate=config.SAMPLE_RATE)
 
     print(f"Input segments: {len(input_segments)} segments")
 
@@ -129,7 +131,7 @@ def run_inference(model, audio_path, device):
 
     return predicted_classes.cpu().numpy()[0], song_input.shape[0]  # Return predicted classes and song length in seconds
 
-def decode_chords(predicted_classes, song_len, hop_length=1024, sample_rate=11025):
+def decode_chords(predicted_classes, song_len, hop_length=config.HOP_LENGTH, sample_rate=config.SAMPLE_RATE):
     """
     Decode the predicted classes into chord names.
     """
@@ -161,4 +163,4 @@ if __name__ == "__main__":
     predicted_classes, song_len = run_inference(model, audio_path, device)
     print(f"Predicted classes: {predicted_classes}")
 
-    decoded_chords = decode_chords(predicted_classes, song_len=song_len, hop_length=1024, sample_rate=11025)
+    decoded_chords = decode_chords(predicted_classes, song_len=song_len)
