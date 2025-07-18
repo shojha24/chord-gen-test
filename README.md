@@ -14,7 +14,7 @@ other cool things i thought about doing with the model architecture:
 - try a model pipeline where an lstm/transformer estimates the onset of a chord, then a cnn that predicts the chord itself using the frames corresponding to the start of the chord -> the end of the next chord
 - learn how to use mamba models? apparently they are better for longer sequences, could potentially train on sequences longer than 10 seconds
 
-cool stuff to read through:
-- [https://arxiv.org/pdf/1706.03762](Attention is All You Need)
-- [https://arxiv.org/pdf/1907.02698](Bidirectional Transformer for Chord Recognition), was able to use this paper as an architectural framework, was able to achieve similar accuracy levels just by using 12 chroma bins and Viterbi decoding instead of 128 spectrogram bins.
-- [https://asmp-eurasipjournals.springeropen.com/articles/10.1186/s13636-023-00314-6](Chord Progressions from Melodies), something I plan on implementing myself
+cool stuff to read through: 
+- [Attention is All You Need](https://arxiv.org/pdf/1706.03762)
+- [Bidirectional Transformer for Chord Recognition](https://arxiv.org/pdf/1907.02698), was able to use this paper as an architectural framework, was able to achieve similar accuracy levels just by using 12 chroma bins and Viterbi decoding instead of 128 spectrogram bins.
+- [Chord Progressions from Melodies](https://asmp-eurasipjournals.springeropen.com/articles/10.1186/s13636-023-00314-6), something I plan on implementing myself
