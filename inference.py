@@ -308,7 +308,7 @@ if __name__ == "__main__":
     sound_font_path = "FluidR3_GM.sf2" 
     model_path = "music_models/epoch_10.pt"
     folder_path = "test_songs"
-    song_name = "perfect"
+    song_name = "kaisehua_instr"
     audio_path = f"{folder_path}/{song_name}.mp3"
     final_output_path = f"{folder_path}/final_{song_name}.wav"
     midi_output_path = f"{folder_path}/{song_name}.mid"
