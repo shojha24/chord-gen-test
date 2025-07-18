@@ -1,15 +1,15 @@
-tried an encoder model with (n_frames, d_model) chroma input -> (n_frames) chords output, attention seemed to not work so well especially on such a long sequence, and chords still fluctuated a lot. my solution was to split songs into 10 second chunks to increase effectiveness of attention and then further utilize viterbi decoding to smooth out the predictions. it works pretty well! next steps:
+tried an encoder-only model with (n_frames, d_model) chroma/onset strength input -> (n_frames) chords output, attention seemed to not work so well especially on such a long sequence, and chords still fluctuated a lot. my solution was to split songs into 10 second chunks to increase effectiveness of attention and then further utilize viterbi decoding to smooth out the predictions. it works pretty well! next steps:
 
 - test on more songs to see if it generalizes well
- - **NOTE: the hidden markov model I use for smoothing uses probabilities for progressions in the key of C major. It does NOT generalize to other keys. This means I have to implement a transposition function for the hmm that can match it with the key of the given song**
+ - there is definitely work that needs to be done here. thinking of using some tracks from the same datasets the btc researchers used so that the model can generalize to real songs w/ varying levels of loudness from each instrument as opposed to the artificial tracks where all of the instruments are played at equal strength.
+ - [Isophonics](http://isophonics.net/datasets), [UsPop2002](https://github.com/tmc323/Chord-Annotations)
 - create data visualizations for validation loss/accuracy, etc.
-- set up a separate hmm.py file that requests the chains from https://raw.githubusercontent.com/schollz/chords/master/chordIndexInC.json once and saves them for future reference
 - build a website/app for other people to use this!!!!
 
 
 other cool things i thought about doing with the model architecture:
 
+- right now, i'm using a first order markov model to determine what the most plausible next chord would be based on the previous one; the predictions end up being decent because the semantic data retrieved from the transformer via attention supplements the markov model in describing chord changes and relationships. it could be a good idea to try implementing a higher order markov model as well for smoothing; could utilize all of the data in [schollz's json](https://raw.githubusercontent.com/schollz/chords/refs/heads/master/chordIndexInC.json)
 - try doing a full encoder decoder structure with (n_frames, d_model) input and an output with the onset timestamps and the chords to play, instead of mapping a chord for every single frame
 - try a model pipeline where an lstm/transformer estimates the onset of a chord, then a cnn that predicts the chord itself using the frames corresponding to the start of the chord -> the end of the next chord
-- learn how to use mamba models? apparently they are better for longer sequences
-- keep training this model for a lot more epochs to see if it just reaches the global minimum very late
+- learn how to use mamba models? apparently they are better for longer sequences, could potentially train on sequences longer than 10 seconds
