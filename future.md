@@ -37,7 +37,7 @@ Melody-to-Chord Model (generate chords)
 Extract vocal melody (monophonic) using a pitch detection model like CREPE or Onsets & Frames.
 
 ### 🎹 Melody → Chord Generation
-Shell's model; use a sequence model (e.g. LSTM, Transformer) to generate chord progressions based on vocal melody.
+Use a sequence model (e.g. LSTM, Transformer) to generate chord progressions based on vocal melody.
 
 ### 🎧 Instrumental/Full Mix → Chord Detection
 My model: Run polyphonic chord recognition through my Transformer + HMM pipeline.
