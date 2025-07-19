@@ -18,3 +18,4 @@ cool stuff to read through:
 - [Attention is All You Need](https://arxiv.org/pdf/1706.03762)
 - [Bidirectional Transformer for Chord Recognition](https://arxiv.org/pdf/1907.02698), was able to use this paper as an architectural framework, was able to achieve similar accuracy levels just by using 12 chroma bins and Viterbi decoding instead of 128 spectrogram bins.
 - [Chord Progressions from Melodies](https://asmp-eurasipjournals.springeropen.com/articles/10.1186/s13636-023-00314-6), something I plan on implementing myself
+- [The Probability of Every Chord Progression](https://schollz.com/tinker/chords/) is a cool read, and created [the chord probabilities i got here](https://github.com/schollz/common-chords)
