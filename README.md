@@ -1,3 +1,5 @@
+dataset used: Ostermann, F., & Vatolkin, I. (2022). AAM: Artificial Audio Multitracks Dataset (v1.1.0) [Data set]. Zenodo. https://doi.org/10.5281/zenodo.5794629
+
 tried an encoder-only model with (n_frames, d_model) chroma/onset strength input -> (n_frames) chords output, attention seemed to not work so well especially on such a long sequence, and chords still fluctuated a lot. my solution was to split songs into 10 second chunks to increase effectiveness of attention and then further utilize viterbi decoding to smooth out the predictions. it works pretty well! next steps:
 
 - see future.md... :O
