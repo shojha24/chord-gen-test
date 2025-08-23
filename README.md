@@ -9,7 +9,7 @@ next steps:
  - there is definitely work that needs to be done here. thinking of using some tracks from the same datasets the btc researchers used so that the model can generalize to real songs w/ varying levels of loudness from each instrument as opposed to the artificial tracks where all of the instruments are played at equal strength.
  - [Isophonics](http://isophonics.net/datasets), [UsPop2002](https://github.com/tmc323/Chord-Annotations)
 - create data visualizations for validation loss/accuracy, etc.
-- build a website/app for other people to use this!!!!
+- build a website/app for other people to use this!!!! website will allow you to visualize and play the chord changes with the song, modify any predictions the model made, and view the finished chord chart with lyrics
 - find/generate datasets that match monophonic melodies to chord charts and/or use the method schollz used to calculate chord progression probabilities to build distributions across various genres
 
 
