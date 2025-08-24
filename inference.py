@@ -306,7 +306,7 @@ def impose_midi_on_audio(midi_path, audio_path, sound_font_path, output_path="fi
 if __name__ == "__main__":
     # --- Configuration ---
     sound_font_path = "FluidR3_GM.sf2" 
-    model_path = "music_models/epoch_10.pt"
+    model_path = "music_models/best_full.pt"
     folder_path = "test_songs"
     song_name = "kaisehua_instr"
     audio_path = f"{folder_path}/{song_name}.mp3"
