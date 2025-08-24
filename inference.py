@@ -306,13 +306,13 @@ def impose_midi_on_audio(midi_path, audio_path, sound_font_path, output_path="fi
 if __name__ == "__main__":
     # --- Configuration ---
     sound_font_path = "FluidR3_GM.sf2" 
-    model_path = "music_models/best_full.pt"
+    model_path = "best_full.pt"
     folder_path = "test_songs"
-    song_name = "kaisehua_instr"
+    song_name = "mirrors"
     audio_path = f"{folder_path}/{song_name}.mp3"
     final_output_path = f"{folder_path}/final_{song_name}.wav"
     midi_output_path = f"{folder_path}/{song_name}.mid"
-    self_transition_prob = 0.98  # Adjust this as needed
+    self_transition_prob = 0.995  # Adjust this as needed
 
     # --- Execution ---
     if not os.path.exists(sound_font_path):

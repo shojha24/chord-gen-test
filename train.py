@@ -82,7 +82,8 @@ def train_model(mix_path="dataset\\mixes", annotation_path="dataset\\annotations
 
     writer = SummaryWriter(experiment_name)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
+    #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
     initial_epoch = 0
     global_step = 0
     loss_fn = nn.CrossEntropyLoss(ignore_index=-1, label_smoothing=0.1).to(device)

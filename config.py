@@ -11,9 +11,9 @@ NUM_CLASSES = 25
 SEQ_LEN_SECONDS = 10
 # Calculated, not hardcoded
 SEQ_LEN_FRAMES = int(SEQ_LEN_SECONDS * SAMPLE_RATE / HOP_LENGTH)
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 5e-4
 LEARNING_RATE_2 = 1e-5
-NUM_EPOCHS = 10
+NUM_EPOCHS = 20
 BATCH_SIZE = 32
 CHORD_ENCODINGS = {
     0: 'A#maj', 1: 'A#min', 2: 'Amaj', 3: 'Amin', 4: 'Bmaj', 5: 'Bmin', 6: 'C#maj', 7: 'C#min', 8: 'Cmaj', 
