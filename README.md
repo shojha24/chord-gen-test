@@ -1,13 +1,15 @@
 dataset used: Ostermann, F., & Vatolkin, I. (2022). AAM: Artificial Audio Multitracks Dataset (v1.1.0) [Data set]. Zenodo. https://doi.org/10.5281/zenodo.5794629
 
-tried an encoder-only model with (n_frames, d_model) chroma/onset strength input -> (n_frames) chords output, attention seemed to not work so well especially on such a long sequence, and chords still fluctuated a lot. my solution was to split songs into 10 second chunks to increase effectiveness of attention and then further utilize viterbi decoding to smooth out the predictions. it works pretty well! next steps:
+tried an encoder-only model with (n_frames, d_model) chroma/onset strength input -> (n_frames) chords output, attention seemed to not work so well especially on such a long sequence, and chords still fluctuated a lot. my solution was to split songs into 10 second chunks to increase effectiveness of attention and then further utilize viterbi decoding to smooth out the predictions. it works pretty well! 83% validation accuracy pre-smoothing, 90%+ post
+
+next steps:
 
 - see future.md... :O
 - test on more songs to see if it generalizes well
  - there is definitely work that needs to be done here. thinking of using some tracks from the same datasets the btc researchers used so that the model can generalize to real songs w/ varying levels of loudness from each instrument as opposed to the artificial tracks where all of the instruments are played at equal strength.
  - [Isophonics](http://isophonics.net/datasets), [UsPop2002](https://github.com/tmc323/Chord-Annotations)
 - create data visualizations for validation loss/accuracy, etc.
-- build a website/app for other people to use this!!!!
+- build a website/app for other people to use this!!!! website will allow you to visualize and play the chord changes with the song, modify any predictions the model made, and view the finished chord chart with lyrics
 - find/generate datasets that match monophonic melodies to chord charts and/or use the method schollz used to calculate chord progression probabilities to build distributions across various genres
 
 
