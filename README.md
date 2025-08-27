@@ -1,6 +1,8 @@
 dataset used: Ostermann, F., & Vatolkin, I. (2022). AAM: Artificial Audio Multitracks Dataset (v1.1.0) [Data set]. Zenodo. https://doi.org/10.5281/zenodo.5794629
 
-tried an encoder-only model with (n_frames, d_model) chroma/onset strength input -> (n_frames) chords output, attention seemed to not work so well especially on such a long sequence, and chords still fluctuated a lot. my solution was to split songs into 10 second chunks to increase effectiveness of attention and then further utilize viterbi decoding to smooth out the predictions. it works pretty well! 89.11% validation accuracy pre-smoothing, 90%+ post
+tried an encoder-only model with (n_frames, d_model) chroma/onset strength input -> (n_frames) chords output, attention seemed to not work so well especially on such a long sequence, and chords still fluctuated a lot. my solution was to split songs into 10 second chunks to increase effectiveness of attention and then further utilize viterbi decoding to smooth out the predictions. it works pretty well! 89.11% validation accuracy pre-smoothing, 90%+ post.
+
+to extract and pair lyrics with the chords, I used demucs to split songs into vocal and instrumental stems, then ran openai-whisper on the vocal track, creating word-by-word timestamps that I could then superimpose onto the chords. the use case I wanted with this model was quickly creating chord charts for songs that didn't already exist on Ultimate Guitar, and while I want to keep working on this in the future (adding more chord types, creating genre-based recommendations, implementing a separate melody-to-accompaniment model for more "creative" chord progressions), this works as a prototype and I will be deploying this soon.
 
 next steps:
 

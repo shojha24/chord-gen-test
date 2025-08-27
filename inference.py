@@ -12,6 +12,8 @@ import librosa
 import config
 import subprocess
 from hmm_in_c import init_hmm
+from lyrics import extract_lyrics_for_song
+
 
 def process_audio(audio_path, sample_rate=config.SAMPLE_RATE, hop_length=config.HOP_LENGTH):
     # Load the audio file
@@ -184,7 +186,7 @@ def get_hmm_params(num_classes, chord_encodings, interval, self_transition_prob)
     return transposed_start_probs, final_frame_matrix
 
 
-def decode_chords_with_viterbi(logits, song_len_frames, interval, self_transition_prob, hop_length=config.HOP_LENGTH, sample_rate=config.SAMPLE_RATE):
+def decode_chords_with_viterbi(logits, song_len_frames, interval, self_transition_prob, output_path, hop_length=config.HOP_LENGTH, sample_rate=config.SAMPLE_RATE):
     """
     Decodes the most likely sequence of chords using Viterbi decoding with CategoricalHMM.
     """
@@ -226,15 +228,18 @@ def decode_chords_with_viterbi(logits, song_len_frames, interval, self_transitio
         end_time = song_len_frames * hop_length / sample_rate
         chords_with_times.append({'start': start_time, 'end': end_time, 'chord': current_chord})
 
-    for item in chords_with_times:
-        print(f"Time: {item['start']:.2f}s - {item['end']:.2f}s, Chord: {item['chord']}")
+    # Save the decoded chords with timestamps to a text file
+    with open(output_path, "w") as f:
+        for chord_info in chords_with_times:
+            f.write(f"{chord_info['start']:.3f}\t{chord_info['end']:.3f}\t{chord_info['chord']}\n")
         
     return chords_with_times
 
-def write_chords_to_midi(chords_with_times, output_path):
+'''def write_chords_to_midi(chords_with_times, output_path):
     """
     Writes the decoded chords to a MIDI file.
     """
+    
     midi = pretty_midi.PrettyMIDI()
     instrument = pretty_midi.Instrument(program=0)
 
@@ -300,7 +305,81 @@ def impose_midi_on_audio(midi_path, audio_path, sound_font_path, output_path="fi
     if os.path.exists(temp_midi_audio_path):
         os.remove(temp_midi_audio_path)
         print(f"Removed temporary file: {temp_midi_audio_path}")
+'''
 
+def process_files(chords_file, lyrics_file, output_file):
+    # Read chords file
+    with open(chords_file, 'r', encoding='utf-8') as f:
+        chords_text = f.read()
+
+    # Read lyrics file
+    with open(lyrics_file, 'r', encoding='utf-8') as f:
+        lyrics_text = f.read()
+
+    # Parse chords
+    chords = []
+    for line in chords_text.strip().splitlines():
+        parts = line.split()
+        if len(parts) == 3:
+            start, end, chord = parts
+            chords.append((float(start), float(end), chord))
+
+    # Parse lyrics
+    lyrics = []
+    for line in lyrics_text.strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 3:
+            start, end = float(parts[0]), float(parts[1])
+            word = " ".join(parts[2:])
+            lyrics.append((start, end, word))
+
+    # Core overlay logic
+    output_lines = []
+    current_line_lyrics = []
+    current_line_chords = []
+    max_line_width = 70
+    last_chord = None
+
+    for start, end, word in lyrics:
+        chord_for_word = None
+        for cstart, cend, chord in chords:
+            if cstart <= start < cend:
+                chord_for_word = chord
+                break
+
+        # Start new line if current exceeds max width
+        if len(" ".join(current_line_lyrics + [word])) > max_line_width:
+            if current_line_chords:
+                chord_line_str = [" "] * (len(" ".join(current_line_lyrics)))
+                for chord_name, idx in current_line_chords:
+                    for j, c in enumerate(chord_name):
+                        if idx + j < len(chord_line_str):
+                            chord_line_str[idx + j] = c
+                output_lines.append("".join(chord_line_str))
+            output_lines.append(" ".join(current_line_lyrics))
+            current_line_lyrics = [word]
+            current_line_chords = [(chord_for_word, 0)] if chord_for_word else []
+        else:
+            if chord_for_word != last_chord:
+                idx = len(" ".join(current_line_lyrics)) + (1 if current_line_lyrics else 0)
+                if chord_for_word:  # Avoid appending None
+                    current_line_chords.append((chord_for_word, idx))
+            current_line_lyrics.append(word)
+        last_chord = chord_for_word
+
+    # Flush last line
+    if current_line_chords:
+        chord_line_str = [" "] * (len(" ".join(current_line_lyrics)))
+        for chord_name, idx in current_line_chords:
+            for j, c in enumerate(chord_name):
+                if idx + j < len(chord_line_str):
+                    chord_line_str[idx + j] = c
+        output_lines.append("".join(chord_line_str))
+    output_lines.append(" ".join(current_line_lyrics))
+
+    # Write output to file
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write("\n".join(output_lines))
 
 # Finally, update the main block
 if __name__ == "__main__":
@@ -308,26 +387,42 @@ if __name__ == "__main__":
     sound_font_path = "FluidR3_GM.sf2" 
     model_path = "best_full.pt"
     folder_path = "test_songs"
-    song_name = "mirrors"
+    song_name = "kaisehua"
     audio_path = f"{folder_path}/{song_name}.mp3"
-    final_output_path = f"{folder_path}/final_{song_name}.wav"
-    midi_output_path = f"{folder_path}/{song_name}.mid"
+    final_output_path = f"{folder_path}/htdemucs/final_{song_name}.wav"
+    midi_output_path = f"{folder_path}/htdemucs/{song_name}/{song_name}.mid"
+    lyrics_output_path = f"{folder_path}/htdemucs/{song_name}/chords_with_timestamps.txt"
+    final_output_txt = f"{folder_path}/htdemucs/{song_name}/final_chords_and_lyrics.txt"
     self_transition_prob = 0.995  # Adjust this as needed
 
     # --- Execution ---
     if not os.path.exists(sound_font_path):
         print(f"ERROR: SoundFont file not found at '{sound_font_path}'. Please update the path.")
     else:
+        # Call lyrics extraction
+        lyrics_output = extract_lyrics_for_song(
+            input_mp3=audio_path,
+            output_dir=folder_path,
+            whisper_model="small"
+        )
+        print(f"Lyrics with timestamps saved to: {lyrics_output}")
+
         model, device = get_model(model_path)
 
         # run_inference now returns LOGITS
         all_logits, song_len_frames, interval = run_inference(model, audio_path, device)
 
         # Use the new Viterbi decoder
-        decoded_chords = decode_chords_with_viterbi(all_logits, song_len_frames, interval, self_transition_prob)
+        decoded_chords = decode_chords_with_viterbi(all_logits, song_len_frames, interval, self_transition_prob, lyrics_output_path)
+        print(f"Decoded chords with timestamps saved to: {lyrics_output_path}")
+
+        # Process and combine chords and lyrics
+        process_files(lyrics_output_path, lyrics_output, final_output_txt)
+        print(f"Final chords and lyrics saved to: {final_output_txt}")
+
 
         # Write the decoded chords to a MIDI file
-        write_chords_to_midi(decoded_chords, output_path=midi_output_path)
+        # write_chords_to_midi(decoded_chords, output_path=midi_output_path)
 
         # Impose the MIDI on the original audio
-        impose_midi_on_audio(midi_output_path, audio_path, sound_font_path, output_path=final_output_path)
+        # impose_midi_on_audio(midi_output_path, audio_path, sound_font_path, output_path=final_output_path)

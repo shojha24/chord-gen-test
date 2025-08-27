@@ -23,6 +23,7 @@ def get_hmm_params(num_classes, chord_encodings):
 
         for from_chord, transitions in data.items():
             if from_chord in inverted_encodings:
+                print("Processing transitions from chord:", from_chord)
                 from_idx = inverted_encodings[from_chord]
                 start_probs[from_idx] += sum(transitions.values())
                 for to_chord, prob in transitions.items():
@@ -56,12 +57,15 @@ def load_hmm_params_from_json(filename='hmm_params.json'):
 
 def init_hmm(num_classes, chord_encodings, filename='hmm_params.json'):
     # This function is correct.
-    if os.path.exists(filename):
+    '''if os.path.exists(filename):
         print(f"Loading cached HMM parameters from {filename}...")
         start_probs, transition_matrix = load_hmm_params_from_json(filename)
     else:
        start_probs, transition_matrix = get_hmm_params(num_classes, chord_encodings)
-       save_hmm_params_to_json(start_probs, transition_matrix)
+       save_hmm_params_to_json(start_probs, transition_matrix)'''
+    
+    start_probs, transition_matrix = get_hmm_params(num_classes, chord_encodings)
+    save_hmm_params_to_json(start_probs, transition_matrix)
     return start_probs, transition_matrix
 
 if __name__ == "__main__":
