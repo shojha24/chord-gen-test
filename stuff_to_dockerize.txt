@@ -1,0 +1,24 @@
+Files:
+- api.py (will handle requests)
+- inference.py (bulk of chord logic)
+- lyrics.py (handles lyrics)
+- hmm_in_c.py (retrieves hidden markov model parameters)
+- hmm_params.json (loaded by hmm_in_c.py)
+- model.py (needed to initialize the pt file)
+- best_full.pt (this is the model itself)
+- config.py (contains a lotta constants)
+
+Environment Config:
+- Python 3.12.3
+- ffmpeg
+- fluidsynth
+- demucs
+- numpy
+- requests
+- whisper
+- torch
+- hmmlearn
+- types
+- pretty_midi
+- pydub
+- librosa

@@ -11,8 +11,33 @@ import numpy as np
 import librosa
 import config
 import subprocess
-from hmm_in_c import init_hmm
-from lyrics import extract_lyrics_for_song
+import whisper
+import json
+
+
+def extract_lyrics_for_song(input_mp3, output_dir, whisper_model="small"):
+    """Top-level function: splits stems, extracts vocals, runs Whisper, saves lyrics."""
+    base_name = os.path.splitext(os.path.basename(input_mp3))[0]
+
+    # Extract lyrics
+    model = whisper.load_model(whisper_model)
+    result = model.transcribe(input_mp3, word_timestamps=True)
+    segments = result["segments"]
+    
+    # Save results
+    lyrics_txt = os.path.join(output_dir, base_name, "lyrics_with_timestamps.txt")
+    lines = []
+    for segment in segments:
+        for word in segment.get("words", []):
+            start = word["start"]
+            end = word["end"]
+            text = word["word"].strip()
+            if text:  # Ignore empty "words"
+                lines.append(f"{start:.3f}\t{end:.3f}\t{text}")
+    with open(lyrics_txt, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    return lyrics_txt
 
 
 def process_audio(audio_path, sample_rate=config.SAMPLE_RATE, hop_length=config.HOP_LENGTH):
@@ -83,7 +108,7 @@ def get_model(model_path):
 
     return model, device
 
-# In inference.py, replace sliding_window_and_padding
+
 def create_inference_segments(song_input, seq_len):
     """
     Takes a full song input and splits it into segments of seq_len,
@@ -112,7 +137,6 @@ def create_inference_segments(song_input, seq_len):
     return torch.tensor(np.array(segments), dtype=torch.float32), torch.stack(masks)
 
 
-# In inference.py, replace run_inference
 def run_inference(model, audio_path, device):
     # Process the audio file
     song_input, interval = process_audio(audio_path)
@@ -144,7 +168,71 @@ def run_inference(model, audio_path, device):
     return full_logits.cpu(), original_song_len_frames, interval
 
 
-def get_hmm_params(num_classes, chord_encodings, interval, self_transition_prob):
+def get_hmm_params(num_classes, chord_encodings):
+    """
+    Loads and processes the raw CHORD-TO-CHORD transition data from the source.
+    This function does NOT perform frame adaptation.
+    """
+    print("Loading raw chord-to-chord HMM parameters...")
+    try:
+        url = "https://raw.githubusercontent.com/schollz/chords/master/chordIndexInC.json"
+        data = requests.get(url).json()
+
+        inverted_encodings = {name.replace("maj", "").replace("min", "m"): idx for idx, name in chord_encodings.items() if name != 'N.C.'}
+        
+        chord_transition_matrix = np.full((num_classes, num_classes), 1e-6) # Smoothing
+        start_probs = np.full((num_classes,), 1e-6)
+
+        for from_chord, transitions in data.items():
+            if from_chord in inverted_encodings:
+                print("Processing transitions from chord:", from_chord)
+                from_idx = inverted_encodings[from_chord]
+                start_probs[from_idx] += sum(transitions.values())
+                for to_chord, prob in transitions.items():
+                    if to_chord in inverted_encodings:
+                        chord_transition_matrix[from_idx, inverted_encodings[to_chord]] += prob
+
+        # Normalize probabilities
+        start_probs /= start_probs.sum()
+        chord_transition_matrix /= (chord_transition_matrix.sum(axis=1, keepdims=True) + 1e-9)
+
+        print("Successfully created raw chord-to-chord HMM parameters.")
+        # --- FIX: Return the matrix you actually calculated ---
+        return start_probs, chord_transition_matrix
+
+    except Exception as e:
+        print(f"Could not load HMM params: {e}. Falling back to uniform probabilities.")
+        return np.full(num_classes, 1.0/num_classes), np.full((num_classes, num_classes), 1.0/num_classes)
+
+
+def save_hmm_params_to_json(start_probs, transition_matrix, filename='hmm_params.json'):
+    # This function is correct.
+    params = {'start_probs': start_probs.tolist(), 'transition_matrix': transition_matrix.tolist()}
+    with open(filename, 'w') as f:
+        json.dump(params, f, indent=4)
+    print(f"HMM parameters saved to {filename}.")
+
+
+def load_hmm_params_from_json(filename='hmm_params.json'):
+    # This function is correct.
+    with open(filename, 'r') as f:
+        params = json.load(f)
+    return np.array(params['start_probs']), np.array(params['transition_matrix'])
+
+
+def init_hmm(num_classes, chord_encodings, filename='hmm_params.json'):
+    # This function is correct.
+    if os.path.exists(filename):
+        print(f"Loading cached HMM parameters from {filename}...")
+        start_probs, transition_matrix = load_hmm_params_from_json(filename)
+    else:
+       start_probs, transition_matrix = get_hmm_params(num_classes, chord_encodings)
+       save_hmm_params_to_json(start_probs, transition_matrix)
+    
+    return start_probs, transition_matrix
+
+
+def set_hmm(num_classes, chord_encodings, interval, self_transition_prob):
     """
     This function performs the two steps needed for inference:
     1. Loads the base C-major chord-to-chord HMM parameters.
@@ -193,7 +281,7 @@ def decode_chords_with_viterbi(logits, song_len_frames, interval, self_transitio
     num_classes = logits.shape[1]
 
     # 1. Get musically-informed HMM parameters
-    start_probs, transition_matrix = get_hmm_params(num_classes, config.CHORD_ENCODINGS, interval, self_transition_prob)
+    start_probs, transition_matrix = set_hmm(num_classes, config.CHORD_ENCODINGS, interval, self_transition_prob)
 
     # 2. Set up the HMM
     hmm_model = CategoricalHMM(n_components=num_classes)
@@ -235,7 +323,8 @@ def decode_chords_with_viterbi(logits, song_len_frames, interval, self_transitio
         
     return chords_with_times
 
-'''def write_chords_to_midi(chords_with_times, output_path):
+
+def write_chords_to_midi(chords_with_times, output_path):
     """
     Writes the decoded chords to a MIDI file.
     """
@@ -305,7 +394,7 @@ def impose_midi_on_audio(midi_path, audio_path, sound_font_path, output_path="fi
     if os.path.exists(temp_midi_audio_path):
         os.remove(temp_midi_audio_path)
         print(f"Removed temporary file: {temp_midi_audio_path}")
-'''
+
 
 def process_files(chords_file, lyrics_file, output_file):
     # Read chords file
@@ -381,19 +470,21 @@ def process_files(chords_file, lyrics_file, output_file):
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write("\n".join(output_lines))
 
-# Finally, update the main block
+
 if __name__ == "__main__":
     # --- Configuration ---
     sound_font_path = "FluidR3_GM.sf2" 
     model_path = "best_full.pt"
     folder_path = "test_songs"
-    song_name = "kaisehua"
+    song_name = "mirrors"
     audio_path = f"{folder_path}/{song_name}.mp3"
-    final_output_path = f"{folder_path}/htdemucs/final_{song_name}.wav"
-    midi_output_path = f"{folder_path}/htdemucs/{song_name}/{song_name}.mid"
-    lyrics_output_path = f"{folder_path}/htdemucs/{song_name}/chords_with_timestamps.txt"
-    final_output_txt = f"{folder_path}/htdemucs/{song_name}/final_chords_and_lyrics.txt"
-    self_transition_prob = 0.995  # Adjust this as needed
+    output_path = f"{folder_path}/{song_name}"
+    os.makedirs(output_path, exist_ok=True)
+    final_output_path = f"{output_path}/final_{song_name}.wav"
+    midi_output_path = f"{output_path}/{song_name}.mid"
+    lyrics_output_path = f"{output_path}/chords_with_timestamps.txt"
+    final_output_txt = f"{output_path}/final_chords_and_lyrics.txt"
+    self_transition_prob = 0.985  # Adjust this as needed
 
     # --- Execution ---
     if not os.path.exists(sound_font_path):
@@ -422,7 +513,7 @@ if __name__ == "__main__":
 
 
         # Write the decoded chords to a MIDI file
-        # write_chords_to_midi(decoded_chords, output_path=midi_output_path)
+        write_chords_to_midi(decoded_chords, output_path=midi_output_path)
 
         # Impose the MIDI on the original audio
-        # impose_midi_on_audio(midi_output_path, audio_path, sound_font_path, output_path=final_output_path)
+        impose_midi_on_audio(midi_output_path, audio_path, sound_font_path, output_path=final_output_path)
