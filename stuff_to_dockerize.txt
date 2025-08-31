@@ -1,24 +1,25 @@
 Files:
 - api.py (will handle requests)
-- inference.py (bulk of chord logic)
-- lyrics.py (handles lyrics)
-- hmm_in_c.py (retrieves hidden markov model parameters)
+- inference.py (chord logic)
 - hmm_params.json (loaded by hmm_in_c.py)
-- model.py (needed to initialize the pt file)
+- model.py (needed to initialize the model)
 - best_full.pt (this is the model itself)
 - config.py (contains a lotta constants)
+- FluidR3_GM.sf2
 
 Environment Config:
 - Python 3.12.3
-- ffmpeg
-- fluidsynth
-- demucs
-- numpy
-- requests
-- whisper
-- torch
-- hmmlearn
-- types
-- pretty_midi
-- pydub
-- librosa
+- ffmpeg 7.1.1-essentials_build-www.gyan.dev
+- fluidsynth 2.4.7
+- python-multipart==0.0.20
+- numpy==2.2.6
+- requests==2.32.4
+- openai-whisper==20250625
+- torch==2.7.1+cu128
+- hmmlearn==0.3.3
+- typing_extensions==4.14.0
+- pretty_midi==0.2.10
+- pydub==0.25.1
+- librosa==0.11.0
+- fastapi==0.116.1
+- uvicorn==0.35.0

@@ -3,7 +3,7 @@ SAMPLE_RATE = 22050
 HOP_LENGTH = 2048
 N_FFT = 2048 # Should be >= HOP_LENGTH
 N_MELS = 64
-N_BINS = 13 # 12 chroma + 1 onset
+N_BINS = 12 # 12 chroma + 1 onset
 N_FILES = 1000
 N_MEL_FILES = 3000
 D_MODEL = 128
@@ -28,4 +28,4 @@ CHORD_TO_NOTES = {
     "G#maj": [68, 72, 75, 80], "G#min": [68, 71, 75, 80], "Amaj": [69, 73, 76, 81], "Amin": [69, 72, 76, 81],
     "A#maj": [70, 74, 77, 82], "A#min": [70, 73, 77, 82], "Bmaj": [71, 75, 78, 83], "Bmin": [71, 74, 78, 83]
 }
-
+ALPHA = 0.005

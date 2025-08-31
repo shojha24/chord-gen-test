@@ -1,4 +1,3 @@
-import warnings
 import torch
 from hmmlearn.hmm import CategoricalHMM
 import types
@@ -15,7 +14,7 @@ import whisper
 import json
 
 
-def extract_lyrics_for_song(input_mp3, output_dir, whisper_model="small"):
+def extract_lyrics_for_song(input_mp3, output_path, whisper_model="small"):
     """Top-level function: splits stems, extracts vocals, runs Whisper, saves lyrics."""
     base_name = os.path.splitext(os.path.basename(input_mp3))[0]
 
@@ -25,7 +24,7 @@ def extract_lyrics_for_song(input_mp3, output_dir, whisper_model="small"):
     segments = result["segments"]
     
     # Save results
-    lyrics_txt = os.path.join(output_dir, base_name, "lyrics_with_timestamps.txt")
+    lyrics_txt = os.path.join(output_path)
     lines = []
     for segment in segments:
         for word in segment.get("words", []):
@@ -476,15 +475,16 @@ if __name__ == "__main__":
     sound_font_path = "FluidR3_GM.sf2" 
     model_path = "best_full.pt"
     folder_path = "test_songs"
-    song_name = "mirrors"
-    audio_path = f"{folder_path}/{song_name}.mp3"
+    song_name = "mirrors_no_vocals"
+    audio_path = f"{folder_path}/{song_name}.wav"
     output_path = f"{folder_path}/{song_name}"
     os.makedirs(output_path, exist_ok=True)
     final_output_path = f"{output_path}/final_{song_name}.wav"
     midi_output_path = f"{output_path}/{song_name}.mid"
-    lyrics_output_path = f"{output_path}/chords_with_timestamps.txt"
+    chords_output_path = f"{output_path}/chords_with_timestamps.txt"
+    lyrics_output_path = f"{output_path}/lyrics_with_timestamps.txt"
     final_output_txt = f"{output_path}/final_chords_and_lyrics.txt"
-    self_transition_prob = 0.985  # Adjust this as needed
+    self_transition_prob = 0.5  # Adjust this as needed
 
     # --- Execution ---
     if not os.path.exists(sound_font_path):
@@ -493,7 +493,7 @@ if __name__ == "__main__":
         # Call lyrics extraction
         lyrics_output = extract_lyrics_for_song(
             input_mp3=audio_path,
-            output_dir=folder_path,
+            output_path=lyrics_output_path,
             whisper_model="small"
         )
         print(f"Lyrics with timestamps saved to: {lyrics_output}")
@@ -502,15 +502,17 @@ if __name__ == "__main__":
 
         # run_inference now returns LOGITS
         all_logits, song_len_frames, interval = run_inference(model, audio_path, device)
+        # print predicted chords prior to Viterbi decoding
+        predicted_chords = torch.argmax(all_logits, dim=1).cpu().numpy()
+        print("Predicted chords (pre-Viterbi):", [config.CHORD_ENCODINGS.get(idx, "N.C.") for idx in predicted_chords])
 
         # Use the new Viterbi decoder
-        decoded_chords = decode_chords_with_viterbi(all_logits, song_len_frames, interval, self_transition_prob, lyrics_output_path)
-        print(f"Decoded chords with timestamps saved to: {lyrics_output_path}")
+        decoded_chords = decode_chords_with_viterbi(all_logits, song_len_frames, interval, self_transition_prob, chords_output_path)
+        print(f"Decoded chords with timestamps saved to: {chords_output_path}")
 
         # Process and combine chords and lyrics
-        process_files(lyrics_output_path, lyrics_output, final_output_txt)
+        process_files(chords_output_path, lyrics_output, final_output_txt)
         print(f"Final chords and lyrics saved to: {final_output_txt}")
-
 
         # Write the decoded chords to a MIDI file
         write_chords_to_midi(decoded_chords, output_path=midi_output_path)
