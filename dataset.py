@@ -65,28 +65,18 @@ class ChordMatchedDataset(Dataset):
                         beatinfo_headers, inverted_encodings):
         """Process a single audio file and return features and targets"""
         
-        beatinfo_path = os.path.join(annotation_data, f"{file_num:04d}_beatinfo.arff")
+        beatinfo_path = os.path.join(annotation_data, f"{file_num:04d}_beatinfo.csv")
         audio_path = os.path.join(mix_path, f"{file_num:04d}_mix.flac")
-        
-        # Check if files exist
-        if not (os.path.exists(beatinfo_path) and os.path.exists(audio_path)):
-            return None, None
-        
+                
         try:
             # Process annotations
-            beatinfo_df = pd.read_csv(beatinfo_path, comment="@", header=None)
+            beatinfo_df = pd.read_csv(beatinfo_path)
             beatinfo_df.columns = beatinfo_headers
             
             # Clean chord names and encode
             for j in range(beatinfo_df.index.size):
                 beatinfo_df.iat[j, 3] = beatinfo_df.iat[j, 3].replace("'", "")
-                if beatinfo_df.iat[j, 3] in ["BASS_NOTE_EXCEPTION", "N.C."]:
-                    if j > 0:
-                        beatinfo_df.iat[j, 3] = 24
-                    else:
-                        return None, None  # Skip unusable file
-                else:
-                    beatinfo_df.iat[j, 3] = inverted_encodings[beatinfo_df.iat[j, 3]]
+                beatinfo_df.iat[j, 3] = inverted_encodings[beatinfo_df.iat[j, 3]]
             
             # Process audio
             audio, _ = librosa.load(audio_path, sr=sample_rate)
@@ -130,9 +120,9 @@ class ChordMatchedDataset(Dataset):
             print(f"Processed file {file_num}: {len(segments)} segments, {len(chord_segments)} chord segments")
             
             return segments, chord_segments
-            
+
         except Exception as e:
-            print(f"Error processing file {file_num}: {e}")
+            print(f"File {file_num} does not exist")
             return None, None
 
     def normalize_audio_features_static(self, data):
@@ -161,7 +151,8 @@ class ChordMatchedDataset(Dataset):
         
         # Process files in parallel
         with concurrent.futures.ProcessPoolExecutor(max_workers=mp.cpu_count()) as executor:
-            file_numbers = range(1, self.n_files + 1)
+            file_list = os.listdir(self.mix_path)[:self.n_files]
+            file_numbers = [int(f.split('_')[0]) for f in file_list]
             results = list(executor.map(process_func, file_numbers))
         
         # Collect results

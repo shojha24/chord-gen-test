@@ -3,11 +3,10 @@ SAMPLE_RATE = 22050
 HOP_LENGTH = 2048
 N_FFT = 2048 # Should be >= HOP_LENGTH
 N_MELS = 64
-N_BINS = 12 # 12 chroma + 1 onset
-N_FILES = 1000
-N_MEL_FILES = 3000
+N_BINS = 13 # 12 chroma + 1 onset
+N_FILES = 3000
 D_MODEL = 128
-NUM_CLASSES = 25
+NUM_CLASSES = 24
 SEQ_LEN_SECONDS = 10
 # Calculated, not hardcoded
 SEQ_LEN_FRAMES = int(SEQ_LEN_SECONDS * SAMPLE_RATE / HOP_LENGTH)
@@ -16,9 +15,9 @@ LEARNING_RATE_2 = 1e-5
 NUM_EPOCHS = 20
 BATCH_SIZE = 32
 CHORD_ENCODINGS = {
-    0: 'A#maj', 1: 'A#min', 2: 'Amaj', 3: 'Amin', 4: 'Bmaj', 5: 'Bmin', 6: 'C#maj', 7: 'C#min', 8: 'Cmaj', 
-    9: 'Cmin', 10: 'D#maj', 11: 'D#min', 12: 'Dmaj', 13: 'Dmin', 14: 'Emaj', 15: 'Emin', 16: 'F#maj', 
-    17: 'F#min', 18: 'Fmaj', 19: 'Fmin', 20: 'G#maj', 21: 'G#min', 22: 'Gmaj', 23: 'Gmin', 24: 'N.C.'
+    0: 'A#maj', 1: 'A#min', 2: 'Amaj', 3: 'Amin', 4: 'Bmaj', 5: 'Bmin', 6: 'C#maj', 7: 'C#min', 
+    8: 'Cmaj', 9: 'Cmin', 10: 'D#maj', 11: 'D#min', 12: 'Dmaj', 13: 'Dmin', 14: 'Emaj', 15: 'Emin', 
+    16: 'F#maj', 17: 'F#min', 18: 'Fmaj', 19: 'Fmin', 20: 'G#maj', 21: 'G#min', 22: 'Gmaj', 23: 'Gmin'
 }
 CHORD_TO_NOTES = {
     "Cmaj": [60, 64, 67, 72], "Cmin": [60, 63, 67, 72], "C#maj": [61, 65, 68, 73], "C#min": [61, 64, 68, 73],

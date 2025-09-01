@@ -71,24 +71,33 @@ def process_audio(audio_path, sample_rate=config.SAMPLE_RATE, hop_length=config.
     best_score = -1
     best_key = None
 
+    keys = []
+
     # Compare the audio's chroma profile against all 24 key templates
     for i in range(12):
         # Major keys
         key_template = np.roll(major_template, i)
         score = np.corrcoef(chroma_sum, key_template)[0, 1]
-        if score > best_score:
+        keys.append((f"{notes[i]}maj", i, score))
+        if score >= best_score:
             best_score = score
             best_key = (f"{notes[i]}maj", i)
 
         # Minor keys
         key_template = np.roll(minor_template, i)
         score = np.corrcoef(chroma_sum, key_template)[0, 1]
-        if score > best_score:
+        keys.append((f"{notes[i]}min", i, score))
+        if score >= best_score:
             best_score = score
             best_key = (f"{notes[i]}min", i)
 
     interval = best_key[1] # Semitones to shift from C
-        
+
+    print(f"Detected key/interval: {best_key[0]}, {interval} with correlation {best_score:.3f}")
+    print("All key correlations:")
+    for key, idx, score in keys:
+        print(f" - {key}: {score:.3f}")
+
     return song_input, interval
 
 
@@ -177,7 +186,7 @@ def get_hmm_params(num_classes, chord_encodings):
         url = "https://raw.githubusercontent.com/schollz/chords/master/chordIndexInC.json"
         data = requests.get(url).json()
 
-        inverted_encodings = {name.replace("maj", "").replace("min", "m"): idx for idx, name in chord_encodings.items() if name != 'N.C.'}
+        inverted_encodings = {name.replace("maj", "").replace("min", "m"): idx for idx, name in chord_encodings.items()}
         
         chord_transition_matrix = np.full((num_classes, num_classes), 1e-6) # Smoothing
         start_probs = np.full((num_classes,), 1e-6)
@@ -243,7 +252,7 @@ def set_hmm(num_classes, chord_encodings, interval, self_transition_prob):
 
     # Step 2: Transpose the raw matrix to the song's key
     # (This transposition logic is complex but correct)
-    idx_to_pitch_class = {0: 10, 1: 10, 2: 9, 3: 9, 4: 11, 5: 11, 6: 1, 7: 1, 8: 0, 9: 0, 10: 3, 11: 3, 12: 2, 13: 2, 14: 4, 15: 4, 16: 6, 17: 6, 18: 5, 19: 5, 20: 8, 21: 8, 22: 7, 23: 7, 24: -1}
+    idx_to_pitch_class = {0: 10, 1: 10, 2: 9, 3: 9, 4: 11, 5: 11, 6: 1, 7: 1, 8: 0, 9: 0, 10: 3, 11: 3, 12: 2, 13: 2, 14: 4, 15: 4, 16: 6, 17: 6, 18: 5, 19: 5, 20: 8, 21: 8, 22: 7, 23: 7}
     pitch_quality_to_idx = {(v, k % 2): k for k, v in idx_to_pitch_class.items() if v != -1}
     
     transposition_map = np.arange(num_classes)
@@ -475,8 +484,8 @@ if __name__ == "__main__":
     sound_font_path = "FluidR3_GM.sf2" 
     model_path = "best_full.pt"
     folder_path = "test_songs"
-    song_name = "mirrors_no_vocals"
-    audio_path = f"{folder_path}/{song_name}.wav"
+    song_name = "mendes"
+    audio_path = f"{folder_path}/{song_name}.mp3"
     output_path = f"{folder_path}/{song_name}"
     os.makedirs(output_path, exist_ok=True)
     final_output_path = f"{output_path}/final_{song_name}.wav"
@@ -484,7 +493,7 @@ if __name__ == "__main__":
     chords_output_path = f"{output_path}/chords_with_timestamps.txt"
     lyrics_output_path = f"{output_path}/lyrics_with_timestamps.txt"
     final_output_txt = f"{output_path}/final_chords_and_lyrics.txt"
-    self_transition_prob = 0.5  # Adjust this as needed
+    self_transition_prob = 0.98  # Adjust this as needed
 
     # --- Execution ---
     if not os.path.exists(sound_font_path):
@@ -502,6 +511,7 @@ if __name__ == "__main__":
 
         # run_inference now returns LOGITS
         all_logits, song_len_frames, interval = run_inference(model, audio_path, device)
+
         # print predicted chords prior to Viterbi decoding
         predicted_chords = torch.argmax(all_logits, dim=1).cpu().numpy()
         print("Predicted chords (pre-Viterbi):", [config.CHORD_ENCODINGS.get(idx, "N.C.") for idx in predicted_chords])
