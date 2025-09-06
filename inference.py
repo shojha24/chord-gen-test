@@ -12,6 +12,34 @@ import config
 import subprocess
 import whisper
 import json
+import demucs.separate
+
+def extract_midi_from_vocals(input_mp3, output_dir, output_path, n_fft=config.N_FFT, hop_length=config.HOP_LENGTH):
+    """Extract MIDI from vocal stems."""
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Run Demucs to separate stems
+    demucs.separate.main(["--mp3", "--two-stems", "vocals", "-o", output_dir, input_mp3])
+
+    # TODO: Implement MIDI extraction from vocal stems using librosa
+    audio, sr = librosa.load(f"{output_path}/vocals.mp3")
+
+    # Extract melody (monophonic pitch tracking)
+    f0, voiced_flag, voiced_probs = librosa.pyin(
+        audio,
+        fmin=librosa.note_to_hz('C2'),
+        fmax=librosa.note_to_hz('C6'),
+        frame_length=n_fft,
+        hop_length=hop_length
+    )
+
+    # Convert Hz to MIDI
+    melody_midi = librosa.hz_to_midi(f0)
+    melody_midi = np.where(voiced_flag, melody_midi, None)
+
+    with open(f"{output_path}/melody.txt", "wb") as f:
+        f.write(melody_midi)
 
 
 def extract_lyrics_for_song(input_mp3, output_path, whisper_model="small"):
@@ -486,7 +514,7 @@ if __name__ == "__main__":
     folder_path = "test_songs"
     song_name = "mendes"
     audio_path = f"{folder_path}/{song_name}.mp3"
-    output_path = f"{folder_path}/{song_name}"
+    output_path = f"{folder_path}/htdemucs/{song_name}"
     os.makedirs(output_path, exist_ok=True)
     final_output_path = f"{output_path}/final_{song_name}.wav"
     midi_output_path = f"{output_path}/{song_name}.mid"
@@ -499,6 +527,8 @@ if __name__ == "__main__":
     if not os.path.exists(sound_font_path):
         print(f"ERROR: SoundFont file not found at '{sound_font_path}'. Please update the path.")
     else:
+
+        extract_midi_from_vocals(audio_path, folder_path, output_path)
         # Call lyrics extraction
         lyrics_output = extract_lyrics_for_song(
             input_mp3=audio_path,
