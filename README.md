@@ -1,16 +1,14 @@
 dataset used: Ostermann, F., & Vatolkin, I. (2022). AAM: Artificial Audio Multitracks Dataset (v1.1.0) [Data set]. Zenodo. https://doi.org/10.5281/zenodo.5794629
 
-tried an encoder-only model with (n_frames, d_model) chroma/onset strength input -> (n_frames) chords output, attention seemed to not work so well especially on such a long sequence, and chords still fluctuated a lot. my solution was to split songs into 10 second chunks to increase effectiveness of attention and then further utilize viterbi decoding to smooth out the predictions. it works pretty well! 89.11% validation accuracy pre-smoothing, 90%+ post.
+tried an encoder-only model with (n_frames, d_model) chroma/onset strength input -> (n_frames) chords output, attention seemed to not work so well especially on such a long sequence, and chords still fluctuated a lot. my solution was to split songs into 10 second chunks to increase effectiveness of attention and then further utilize viterbi decoding to smooth out the predictions. it works pretty well! 91.20% test split accuracy, further increased after Viterbi.
 
 to extract and pair lyrics with the chords, I used demucs to split songs into vocal and instrumental stems, then ran openai-whisper on the vocal track, creating word-by-word timestamps that I could then superimpose onto the chords. the use case I wanted with this model was quickly creating chord charts for songs that didn't already exist on Ultimate Guitar, and while I want to keep working on this in the future (adding more chord types, creating genre-based recommendations, implementing a separate melody-to-accompaniment model for more "creative" chord progressions), this works as a prototype and I will be deploying this soon.
 
 next steps:
 
 - see future.md... :O
-- test on more songs to see if it generalizes well
- - there is definitely work that needs to be done here. thinking of using some tracks from the same datasets the btc researchers used so that the model can generalize to real songs w/ varying levels of loudness from each instrument as opposed to the artificial tracks where all of the instruments are played at equal strength.
- - [Isophonics](http://isophonics.net/datasets), [UsPop2002](https://github.com/tmc323/Chord-Annotations), [Pop909](https://github.com/music-x-lab/POP909-Dataset)
-- create data visualizations for validation loss/accuracy, etc.
+- i've decided to turn this rudimentary transformer project into a research project (will be visible in a different branch) that utilizes a conformer + mamba structure. It's never been tried before, and I'll be the first to do it. we making it to eurasip/ismir with this one!!
+- while a 24-chord vocabulary is decent, I would like to be able to predict more types of triads and add extensions to these chords
 - build a website/app for other people to use this!!!! website will allow you to visualize and play the chord changes with the song, modify any predictions the model made, and view the finished chord chart with lyrics
 - find/generate datasets that match monophonic melodies to chord charts and/or use the method schollz used to calculate chord progression probabilities to build distributions across various genres
 
