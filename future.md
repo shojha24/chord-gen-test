@@ -26,7 +26,7 @@ Melody-to-Chord Model (generate chords)
 |     (merge + align generated & detected)   |
 +--------------------------------------------+
                    ↓
-         Final Chord Chart Output
+         Final Lead Sheet Output
      ├── Closest Match to Original Song
      ├── Creative Alternative Suggestions
      └── Tonally/Emotionally Different Options
