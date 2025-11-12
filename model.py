@@ -1,6 +1,46 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import List, Optional
+
+
+# --- HELPER FUNCTION 1: Sinusoidal Embeddings ---
+def get_sinusoidal_embeddings(max_len: int, dim: int) -> torch.Tensor:
+    """
+    Creates the sinusoidal positional embedding matrix of shape (max_len, dim).
+    This is the same as the original "Attention Is All You Need" paper.
+    """
+    position = torch.arange(max_len).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, dim, 2) * -(torch.log(torch.tensor(10000.0)) / dim))
+    
+    pe = torch.zeros(max_len, dim)
+    pe[:, 0::2] = torch.sin(position * div_term)
+    pe[:, 1::2] = torch.cos(position * div_term)
+    
+    return pe
+
+# --- HELPER FUNCTION 2: Relative Shift ---
+def relative_shift(x: torch.Tensor) -> torch.Tensor:
+    """
+    Performs the relative shift operation from Transformer-XL.
+    
+    Input x has shape (batch_size, num_heads, seq_len, seq_len)
+    We are shifting the relative attention scores to align them.
+    """
+    batch_size, num_heads, seq_len, _ = x.shape
+    
+    # Pad on the 'key' dimension (last dim)
+    # (b, h, L, L) -> (b, h, L, L+1)
+    x_padded = F.pad(x, (0, 1))
+    
+    # Reshape to (b, h, L+1, L)
+    x_padded = x_padded.reshape(batch_size, num_heads, seq_len + 1, seq_len)
+    
+    # Slice to remove the first 'row' (relative to the first query)
+    # (b, h, L+1, L) -> (b, h, L, L)
+    x_skewed = x_padded[:, :, 1:, :]
+    
+    return x_skewed
 
 
 class FeedForwardModule(nn.Module):
@@ -32,9 +72,10 @@ class FeedForwardModule(nn.Module):
 
 class MultiHeadSelfAttention(nn.Module):
     """
-    Multi-Headed Self-Attention module with pre-LayerNorm.
+    Multi-Headed Self-Attention module with pre-LayerNorm
+    AND Transformer-XL relative positional encoding.
     """
-    def __init__(self, dim, num_heads=4, dropout_rate=0.1):
+    def __init__(self, dim, num_heads=4, dropout_rate=0.1, max_len=5000):
         super(MultiHeadSelfAttention, self).__init__()
         assert dim % num_heads == 0, "Embedding dimension must be divisible by number of heads"
         
@@ -48,6 +89,19 @@ class MultiHeadSelfAttention(nn.Module):
         self.out_linear = nn.Linear(dim, dim)
         self.dropout = nn.Dropout(dropout_rate)
 
+        # 1. Linear layer for projecting position embeddings
+        self.pos_linear = nn.Linear(dim, dim, bias=False)
+        
+        # 2. Learnable global bias vectors (u and v in the paper)
+        # We initialize as (num_heads, head_dim) for easier broadcasting
+        self.u_bias = nn.Parameter(torch.randn(self.num_heads, self.head_dim))
+        self.v_bias = nn.Parameter(torch.randn(self.num_heads, self.head_dim))
+        
+        # 3. Create and register the sinusoidal embedding buffer
+        pos_emb = get_sinusoidal_embeddings(max_len, dim)
+        # register_buffer makes it part of the module, but not a trainable parameter
+        self.register_buffer('pos_emb_buffer', pos_emb)
+
     def forward(self, x):
         residual = x
         x = self.layer_norm(x)
@@ -56,11 +110,57 @@ class MultiHeadSelfAttention(nn.Module):
         
         # Create Q, K, V from a single linear projection
         qkv = self.qkv_linear(x).chunk(3, dim=-1)
-        # Reshape and transpose for multi-head attention
-        Q, K, V = [t.reshape(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2) for t in qkv]
+        
+        Q, K, V = [t.reshape(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2) 
+                   for t in qkv]
+        # Q, K, V shapes: (batch_size, num_heads, seq_length, head_dim)
 
-        # Scaled dot-product attention
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        # --- RELATIVE POSITION CALCULATION ---
+        
+        # 1. Get the sinusoidal embeddings for this sequence length
+        # (seq_length, dim)
+        pos_emb = self.pos_emb_buffer[:seq_length, :]
+        
+        # 2. Project them and reshape
+        # (seq_length, dim) -> (seq_length, dim)
+        K_pos = self.pos_linear(pos_emb)
+        # (seq_length, dim) -> (seq_length, num_heads, head_dim)
+        K_pos = K_pos.reshape(seq_length, self.num_heads, self.head_dim)
+        # (seq_length, num_heads, head_dim) -> (num_heads, seq_length, head_dim)
+        K_pos = K_pos.transpose(0, 1)
+        
+        # 3. Calculate the 4 attention score terms
+        
+        # (a) Content-to-Content: (Q @ K^T)
+        # (b, h, L, d_k) @ (b, h, d_k, L) -> (b, h, L, L)
+        A_content = torch.matmul(Q, K.transpose(-2, -1))
+        
+        # (c) Position-to-Content: (u @ K^T)
+        # (h, 1, d_k) @ (b, h, d_k, L) -> (b, h, 1, L)
+        A_pos_content = torch.matmul(self.u_bias.unsqueeze(1), K.transpose(-2, -1))
+        
+        # (b) Content-to-Position: (Q @ K_pos^T)
+        # This is the one that needs skewing
+        # (b, h, L, d_k) @ (h, d_k, L) -> (b, h, L, L)
+        S_rel_b = torch.matmul(Q, K_pos.transpose(-2, -1))
+        
+        # (d) Position-to-Position: (v @ K_pos^T)
+        # This also needs skewing
+        # (h, 1, d_k) @ (h, d_k, L) -> (h, 1, L)
+        S_rel_d = torch.matmul(self.v_bias.unsqueeze(1), K_pos.transpose(-2, -1))
+
+        # 4. Perform the relative shift (skewing) on (b) and (d)
+        A_rel_b = relative_shift(S_rel_b)
+        A_rel_d = relative_shift(S_rel_d)
+        
+        # 5. Sum all terms
+        scores = A_content + A_pos_content + A_rel_b + A_rel_d
+        
+        # 6. Apply scaling
+        scores = scores / (self.head_dim ** 0.5)
+        
+        # --- END OF RELATIVE POSITION CALCULATION ---
+
         attn_weights = torch.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
 
