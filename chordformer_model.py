@@ -139,7 +139,7 @@ class MultiHeadSelfAttention(nn.Module):
         # (h, 1, d_k) @ (b, h, d_k, L) -> (b, h, 1, L)
         A_pos_content = torch.matmul(self.u_bias.unsqueeze(1), K.transpose(-2, -1))
         
-        # (b) Content-to-Position: (Q @ K_pos^T)
+        """# (b) Content-to-Position: (Q @ K_pos^T)
         # This is the one that needs skewing
         # (b, h, L, d_k) @ (h, d_k, L) -> (b, h, L, L)
         S_rel_b = torch.matmul(Q, K_pos.transpose(-2, -1))
@@ -151,10 +151,29 @@ class MultiHeadSelfAttention(nn.Module):
 
         # 4. Perform the relative shift (skewing) on (b) and (d)
         A_rel_b = relative_shift(S_rel_b)
-        A_rel_d = relative_shift(S_rel_d)
+        A_rel_d = relative_shift(S_rel_d)"""
+
+        # (b) Content-to-Position: (Q @ K_pos^T)
+        # This is the one that needs skewing
+        # (b, h, L, d_k) @ (h, d_k, L) -> (b, h, L, L)
+        S_rel_b = torch.matmul(Q, K_pos.transpose(-2, -1))
+        
+        # (d) Position-to-Position: (v @ K_pos^T)
+        # This term needs to be broadcast across the query length dimension (dim -2)
+        # (h, 1, d_k) @ (h, d_k, L) -> (h, 1, L)
+        S_rel_d_base = torch.matmul(self.v_bias.unsqueeze(1), K_pos.transpose(-2, -1))
+        
+        # Broadcast across batch and query length. (1, h, 1, L) -> (B, h, L, L)
+        S_rel_d_broadcast = S_rel_d_base.unsqueeze(0).expand(batch_size, self.num_heads, seq_length, seq_length)
+
+        # 4. Perform the relative shift (skewing) on (b) and (d)
+        A_rel_b = relative_shift(S_rel_b)
+        # Apply shift to the broadcasted tensor
+        A_rel_d = relative_shift(S_rel_d_broadcast)
         
         # 5. Sum all terms
-        scores = A_content + A_pos_content + A_rel_b + A_rel_d
+        # A_pos_content is (B, H, 1, L). It correctly broadcasts across the query dimension (dim -2) during the sum.
+        scores = A_content + A_pos_content + A_rel_b + A_rel_d 
         
         # 6. Apply scaling
         scores = scores / (self.head_dim ** 0.5)
@@ -364,19 +383,15 @@ def build_chordformer(
     return model
 
 
-# --- Example Usage ---
-# Build the model using the default hyperparameters from the paper [attached_file:1]
-chordformer_model = build_chordformer()
+if __name__ == "__main__":
+    chordformer_model = build_chordformer()
+    print(chordformer_model)
 
-# Print the model to verify its structure
-print(chordformer_model)
+    dummy_cqt = torch.randn(8, 1000, 252)
+    predictions = chordformer_model(dummy_cqt)
 
-# Test with a dummy input tensor
-dummy_cqt = torch.randn(8, 1000, 252) # (batch, sequence_length, cqt_bins)
-predictions = chordformer_model(dummy_cqt)
-
-print("\n--- Test Run ---")
-print(f"Input shape: {dummy_cqt.shape}")
-print("Output shapes for each chord component head:")
-for i, p in enumerate(predictions):
-    print(f"  Head {i+1}: {p.shape}")
+    print("\n--- Test Run ---")
+    print(f"Input shape: {dummy_cqt.shape}")
+    print("Output shapes for each chord component head:")
+    for i, p in enumerate(predictions):
+        print(f"  Head {i+1}: {p.shape}")

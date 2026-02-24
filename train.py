@@ -5,9 +5,11 @@ from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 from tqdm import tqdm
 from typing import List, Optional
-from model import build_chordformer 
+from chordformer_model import build_chordformer 
+from preprocessing import PreprocessingConfig, create_dataloaders
 
 
+"""
 # --- 1. Placeholder Dataset (Unchanged) ---
 class ChordFormerDataset(Dataset):
     def __init__(self, num_songs=100, seq_len=1000, feature_dim=252, output_dims=None):
@@ -28,36 +30,142 @@ class ChordFormerDataset(Dataset):
             torch.randint(0, dim, (self.seq_len,)) for dim in self.output_dims
         ]
         return cqt_segment, target_labels
+"""
 
-# --- 2. Custom Loss Function (Unchanged) ---
+# --- Custom Loss Function ---
 class ChordFormerLoss(nn.Module):
+    """
+    Computes the weighted cross-entropy loss across all 6 chord component heads.
+    """
     def __init__(self, class_weights: Optional[List[torch.Tensor]] = None):
         super(ChordFormerLoss, self).__init__()
-        self.class_weights = class_weights
-        self.loss_functions = []
-        if self.class_weights:
-            for weights in self.class_weights:
+        
+        # Using nn.ModuleList automatically handles pushing the loss functions 
+        # (and their internal weight tensors) to the correct GPU/device
+        self.loss_functions = nn.ModuleList()
+        
+        if class_weights:
+            for weights in class_weights:
                 self.loss_functions.append(nn.CrossEntropyLoss(weight=weights))
         else:
-            self.loss_functions.append(nn.CrossEntropyLoss())
+            for _ in range(6):  
+                self.loss_functions.append(nn.CrossEntropyLoss())
 
-    def forward(self, predictions: List[torch.Tensor], targets: List[torch.Tensor]):
+    def forward(self, predictions: List[torch.Tensor], targets: List[torch.Tensor]) -> torch.Tensor:
         total_loss = 0.0
-        device = predictions[0].device
-        if self.class_weights:
-            for i, loss_fn in enumerate(self.loss_functions):
-                if loss_fn.weight.device != device:
-                    self.loss_functions[i].weight = self.class_weights[i].to(device)
         
         for i, (pred, target) in enumerate(zip(predictions, targets)):
+            # Flatten predictions: (batch, seq_len, num_classes) -> (batch * seq_len, num_classes)
             pred_flat = pred.view(-1, pred.size(-1))
+            # Flatten targets: (batch, seq_len) -> (batch * seq_len)
             target_flat = target.view(-1)
-            loss_fn = self.loss_functions[i] if self.class_weights else self.loss_functions[0]
+            # Accumulate the loss for this head
+            loss_fn = self.loss_functions[i]
             total_loss += loss_fn(pred_flat, target_flat)
             
         return total_loss
 
-# --- 3. Validation and Evaluation Functions (Updated) ---
+
+def compute_class_weights(
+    dataset, 
+    output_dims: List[int], 
+    gamma: float = 0.5, 
+    w_max: float = 10.0, 
+    eps: float = 1e-6
+) -> List[torch.Tensor]:
+    """
+    Computes class weights according to the ChordFormer paper's formula:
+    w = min( (n_m / max_n)^(-gamma), w_max )
+    """
+    print(f"Calculating class frequencies for re-weighting (gamma={gamma}, w_max={w_max})...")
+    # 1. Tally the exact frequency of every class for all 6 heads
+    counts = [torch.zeros(dim, dtype=torch.float64) for dim in output_dims]
+    
+    for _, labels in dataset:
+        for i, head_labels in enumerate(labels):
+            # Flatten the labels to 1D before bin counting
+            bincount = torch.bincount(head_labels.view(-1), minlength=output_dims[i]).to(torch.float64)
+            counts[i] += bincount
+
+    # 2. Apply the paper's specific bounding formula
+    weights: List[torch.Tensor] = []
+    
+    for i, count in enumerate(counts):
+        # Find the maximum class frequency for this specific head
+        max_count = count.max() 
+        if max_count == 0:
+            # Fallback if a head is completely empty (shouldn't happen with real data)
+            weights.append(torch.ones(output_dims[i], dtype=torch.float32))
+            continue
+            
+        # (n_m / max_n)
+        ratio = count / max_count
+        # Add epsilon to prevent 0^(-gamma), which evaluates to infinity
+        ratio = torch.clamp(ratio, min=eps)
+        # (ratio)^(-gamma)
+        w = ratio ** (-gamma)
+        # Clamp to w_max
+        w = torch.clamp(w, max=w_max)
+        weights.append(w.to(torch.float32))
+        
+    return weights
+
+
+def build_crf_transition_matrix(num_classes: int, penalty: float) -> torch.Tensor:
+    """
+    Builds a fixed transition log-probability matrix based on Eq. 12 from the paper.
+    log_trans[i, j] = 0 if i == j else -penalty
+    """
+    # Initialize matrix with the penalty for changing states
+    trans_log = torch.full((num_classes, num_classes), -penalty, dtype=torch.float32)
+    # Zero penalty for staying in the exact same state (diagonal)
+    trans_log.fill_diagonal_(0.0)
+    
+    return trans_log
+
+
+def viterbi_decode_crf(logits: torch.Tensor, penalty: float = 2.0) -> torch.Tensor:
+    """
+    Decodes the most likely sequence using a fixed transition penalty.
+    
+    Args:
+        logits: (batch, seq_len, num_classes) - Raw outputs from the model head.
+        penalty: The gamma hyperparameter controlling transition smoothness.
+    """
+    batch, seq_len, num_classes = logits.shape
+    device = logits.device
+    
+    # Convert raw logits to log probabilities (the observation potentials)
+    log_probs = torch.log_softmax(logits, dim=-1)
+    # Build our fixed transition matrix
+    trans_log = build_crf_transition_matrix(num_classes, penalty).to(device) 
+    decoded = torch.zeros((batch, seq_len), dtype=torch.long, device=device)
+    
+    for b in range(batch):
+        # Start probabilities (uniform relative to each other)
+        score = log_probs[b, 0]
+        backpointers = []
+        
+        for t in range(1, seq_len):
+            # score shape: (num_classes, 1) to broadcast across next possible states
+            next_score = score.unsqueeze(1) + trans_log
+            # Find the best previous state for each possible current state
+            best_prev_score, best_prev_state = torch.max(next_score, dim=0)
+            # Add the observation potentials for time t
+            score = best_prev_score + log_probs[b, t]
+            backpointers.append(best_prev_state)
+            
+        # Backtrack to find the optimal path
+        last_state = torch.argmax(score)
+        decoded[b, seq_len - 1] = last_state
+        
+        for t in range(seq_len - 2, -1, -1):
+            last_state = backpointers[t][last_state]
+            decoded[b, t] = last_state
+            
+    return decoded
+
+# --- Validation and Evaluation Functions ---
 def run_validation(model, val_dataloader, device, loss_fn):
     model.eval()
     total_val_loss = 0
@@ -73,7 +181,8 @@ def run_validation(model, val_dataloader, device, loss_fn):
     print(f"Validation Loss: {avg_loss:.4f}")
     return avg_loss
 
-def run_evaluation(model, test_dataloader, device, loss_fn):
+
+def run_evaluation(model, test_dataloader, device, loss_fn, crf_params=None):
     """
     Runs final evaluation on the test set for a multi-head model.
     """
@@ -81,6 +190,7 @@ def run_evaluation(model, test_dataloader, device, loss_fn):
     total_loss = 0
     # Store predictions and targets for each of the 6 heads
     all_preds = [[] for _ in range(6)]
+    all_crf_preds = [[] for _ in range(6)] if crf_params is not None else None
     all_targets = [[] for _ in range(6)]
 
     with torch.no_grad():
@@ -95,9 +205,15 @@ def run_evaluation(model, test_dataloader, device, loss_fn):
 
             # Get argmax for each head and store results
             for i in range(6):
+                # 1. Standard Argmax (Raw Accuracy)
                 predicted_classes = torch.argmax(predictions[i], dim=-1)
                 all_preds[i].extend(predicted_classes.view(-1).cpu().numpy())
                 all_targets[i].extend(target_labels[i].view(-1).cpu().numpy())
+
+                # 2. CRF Smoothed Decoding 
+                # (You can tune the penalty between 1.0 and 5.0 to see what works best)
+                decoded = viterbi_decode_crf(predictions[i], penalty=2.0)
+                all_crf_preds[i].extend(decoded.view(-1).cpu().numpy())
 
     avg_loss = total_loss / len(test_dataloader)
     print(f"\n--- Final Test Set Evaluation ---")
@@ -106,27 +222,45 @@ def run_evaluation(model, test_dataloader, device, loss_fn):
     # Calculate and print accuracy for each head
     head_names = ["Root/Triad", "Bass", "7th", "9th", "11th", "13th"]
     accuracies = []
+    crf_accuracies = []
     for i in range(6):
         preds_np = torch.tensor(all_preds[i])
         targets_np = torch.tensor(all_targets[i])
         accuracy = (preds_np == targets_np).float().mean().item()
         accuracies.append(accuracy)
         print(f"  - Accuracy (Head {i+1} - {head_names[i]}): {accuracy:.4f}")
+
+        if all_crf_preds is not None:
+            crf_preds_np = torch.tensor(all_crf_preds[i])
+            crf_accuracy = (crf_preds_np == targets_np).float().mean().item()
+            crf_accuracies.append(crf_accuracy)
+            print(f"  - CRF Decoded Accuracy (Head {i+1} - {head_names[i]}): {crf_accuracy:.4f}")
     
     avg_accuracy = sum(accuracies) / len(accuracies)
     print(f"Average Head Accuracy: {avg_accuracy:.4f}")
+    if crf_accuracies:
+        avg_crf_accuracy = sum(crf_accuracies) / len(crf_accuracies)
+        print(f"Average CRF Decoded Head Accuracy: {avg_crf_accuracy:.4f}")
     print("---------------------------------")
     # For a full implementation, you would combine the head predictions into final
     # chord labels and use mir_eval for official metrics like WCSR.
     return avg_loss, accuracies
 
 
-# --- 4. Main Training Pipeline (Updated) ---
+# --- Main Training Pipeline ---
 def train_model(
     num_epochs=50, 
     lr=1e-3, 
     batch_size=24,
-    experiment_name="runs/chordformer_final"
+    experiment_name="runs/chordformer_final",
+    dataset_root="bello_dataset",
+    segment_seconds=10.0,
+    max_songs=None,
+    use_cache=True,
+    refresh_cache=False,
+    cache_dir=".cache/chordformer",
+    use_class_weights=True,
+    crf_penalty=2.0, # Replaced crf_smoothing with the fixed transition penalty
 ):
     torch.cuda.empty_cache()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -134,27 +268,33 @@ def train_model(
 
     Path("chordformer_models").mkdir(parents=True, exist_ok=True)
 
-    # UPDATED: Setup all three datasets
-    dataset = ChordFormerDataset()
-    total_len = len(dataset)
-    train_len = int(0.6 * total_len)
-    val_len = int(0.2 * total_len)
-    test_len = total_len - train_len - val_len
-    
-    train_ds, val_ds, test_ds = random_split(
-        dataset, [train_len, val_len, test_len], 
-        generator=torch.Generator().manual_seed(42)
+    dataset_cfg = PreprocessingConfig(
+        dataset_root=dataset_root,
+        segment_seconds=segment_seconds,
+        max_songs=max_songs,
+        use_cache=use_cache,
+        refresh_cache=refresh_cache,
+        cache_dir=cache_dir,
     )
-    
-    train_dataloader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_dataloader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
-    test_dataloader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
-    print(f"Data split: {len(train_ds)} train, {len(val_ds)} validation, {len(test_ds)} test samples.")
 
+    # 1. Instantiate the dataloaders (Augmentation is handled automatically for the train split)
+    train_dataloader, val_dataloader, test_dataloader = create_dataloaders(dataset_cfg, batch_size=batch_size)
+    print(f"Data split: {len(train_dataloader.dataset)} train, {len(val_dataloader.dataset)} validation, {len(test_dataloader.dataset)} test samples.")
+
+    # 2. Compute the constrained class weights
+    output_dims = [85, 13, 4, 4, 3, 3]
+    class_weights = compute_class_weights(
+        train_dataloader.dataset, 
+        output_dims, 
+        gamma=0.5, 
+        w_max=10.0
+    ) if use_class_weights else None
+
+    # 3. Build Model, Optimizer, and Loss
     model = build_chordformer().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=5, verbose=True)
-    loss_fn = ChordFormerLoss(class_weights=None).to(device)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=5)
+    loss_fn = ChordFormerLoss(class_weights=class_weights).to(device)
     
     writer = SummaryWriter(experiment_name)
     global_step = 0
@@ -191,8 +331,8 @@ def train_model(
     writer.close()
     print("\nTraining finished.")
     
-    # UPDATED: Run final evaluation on the held-out test set
-    run_evaluation(model, test_dataloader, device, loss_fn)
+    # 4. Final Evaluation with the fixed CRF transition penalty
+    run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=crf_penalty)
 
 
 if __name__ == "__main__":

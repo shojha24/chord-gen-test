@@ -5,6 +5,8 @@ share
 runs
 opus_books_weights
 dataset
+bello_dataset
 *.hdf5
 music_models
 *.sf2
+.cache
