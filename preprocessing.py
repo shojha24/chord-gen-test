@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 
-ROOT_TRIAD_VOCAB = ["N", "maj", "min", "sus4", "sus2", "dim", "aug"]
+ROOT_TRIAD_VOCAB = ["5", "maj", "min", "sus4", "sus2", "dim", "aug"]
 SEVENTH_VOCAB = ["N", "7", "b7", "bb7"]
 NINTH_VOCAB = ["N", "9", "#9", "b9"]
 ELEVENTH_VOCAB = ["N", "11", "#11"]
@@ -119,23 +119,18 @@ def _infer_triad(descriptor: str) -> str:
         return "aug"
     if d.startswith("min") or ":min" in d:
         return "min"
-    if d.startswith("maj"):
-        return "maj"
-    if re.match(r"^(7|9|11|13)", d):
+    if d.startswith("maj") or re.match(r"^(7|9|11|13)", d):
         return "maj"
     if d.startswith("5"):
-        return "N"
+        return "5"  # <--- Map to the new power chord class, NOT silence
     if d.startswith("("):
         has_b3 = "b3" in d
         has_b5 = "b5" in d
         has_3 = re.search(r"(^|[^b#])3", d) is not None
-        if has_b3 and has_b5:
-            return "dim"
-        if has_b3:
-            return "min"
-        if has_3:
-            return "maj"
-        return "N"
+        if has_b3 and has_b5: return "dim"
+        if has_b3: return "min"
+        if has_3: return "maj"
+        return "5"  # <--- If no 3rd is found, fallback to power chord instead of silence
     return "maj"
 
 
@@ -147,56 +142,51 @@ def _extract_extension_states(descriptor: str, triad: str) -> Tuple[str, str, st
     eleventh = "N"
     thirteenth = "N"
 
-    if d.startswith("maj13"):
-        seventh, ninth, thirteenth = "7", "9", "13"
-    elif d.startswith("maj11"):
-        seventh, ninth, eleventh = "7", "9", "11"
-    elif d.startswith("maj9"):
-        seventh, ninth = "7", "9"
-    elif d.startswith("maj7"):
-        seventh = "7"
-    elif d.startswith("13"):
-        seventh, ninth, thirteenth = "b7", "9", "13"
-    elif d.startswith("11"):
-        seventh, ninth, eleventh = "b7", "9", "11"
-    elif d.startswith("9"):
-        seventh, ninth = "b7", "9"
-    elif d.startswith("7"):
-        seventh = "b7"
-    elif "min7" in d or "hdim7" in d or "dim7" in d:
-        seventh = "b7"
-    elif "maj7" in d:
-        seventh = "7"
+    # PHASE 1: Broadly catch base extension levels (cascading defaults)
+    # Checking highest intervals first ensures we cascade down correctly
+    if "13" in d or "6" in d:
+        if "maj13" in d:
+            seventh, ninth, thirteenth = "7", "9", "13"
+        else:
+            seventh, ninth, thirteenth = "b7", "9", "13"
+    elif "11" in d:
+        if "maj11" in d:
+            seventh, ninth, eleventh = "7", "9", "11"
+        else:
+            seventh, ninth, eleventh = "b7", "9", "11"
+    elif "9" in d:
+        if "maj9" in d:
+            seventh, ninth = "7", "9"
+        else:
+            seventh, ninth = "b7", "9"
+    elif "7" in d or triad == "dim": 
+        if "maj7" in d:
+            seventh = "7"
+        elif "dim7" in d and triad == "dim":
+            seventh = "bb7"
+        elif "7" in d:
+            seventh = "b7"
 
+    # PHASE 2: Extract explicit modifiers and apply specific accidentals
     matches = re.findall(r"(bb|b|#)?(7|9|11|13|6)", d)
     for accidental, degree in matches:
         if degree == "7":
-            if accidental == "bb":
+            if accidental == "bb": 
                 seventh = "bb7"
-            elif accidental == "b":
+            elif accidental == "b": 
                 seventh = "b7"
-            else:
-                seventh = "7"
+            elif accidental == "" and "maj" in d: 
+                seventh = "7" # Only force a major 7th if "maj" is explicitly in the descriptor
         elif degree == "9":
-            if accidental == "#":
-                ninth = "#9"
-            elif accidental == "b":
-                ninth = "b9"
-            else:
-                ninth = "9"
+            if accidental == "#": ninth = "#9"
+            elif accidental == "b": ninth = "b9"
+            else: ninth = "9"
         elif degree == "11":
-            if accidental == "#":
-                eleventh = "#11"
-            elif accidental != "b":
-                eleventh = "11"
+            if accidental == "#": eleventh = "#11"
+            else: eleventh = "11"
         elif degree in {"13", "6"}:
-            if accidental == "b":
-                thirteenth = "b13"
-            else:
-                thirteenth = "13"
-
-    if triad == "dim" and seventh == "N" and "dim7" in d:
-        seventh = "bb7"
+            if accidental == "b": thirteenth = "b13"
+            else: thirteenth = "13"
 
     return seventh, ninth, eleventh, thirteenth
 
@@ -221,6 +211,8 @@ def parse_harte_label(label: str) -> Tuple[int, int, int, int, int, int]:
         bass_pc = _note_to_pitch_class(bass_token)
         if bass_pc is None:
             bass_pc = _degree_to_pitch_class(bass_token, root_pc)
+    else:
+        bass_pc = root_pc
 
     root_triad_idx = _encode_root_triad(root_pc, triad)
     bass_idx = _encode_bass(bass_pc)
