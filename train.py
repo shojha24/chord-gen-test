@@ -7,6 +7,7 @@ from tqdm import tqdm
 from typing import List, Optional
 from chordformer_model import build_chordformer 
 from preprocessing import PreprocessingConfig, create_dataloaders
+from sklearn.metrics import classification_report, recall_score, accuracy_score
 
 
 """
@@ -126,43 +127,52 @@ def build_crf_transition_matrix(num_classes: int, penalty: float) -> torch.Tenso
 
 def viterbi_decode_crf(logits: torch.Tensor, penalty: float = 2.0) -> torch.Tensor:
     """
-    Decodes the most likely sequence using a fixed transition penalty.
-    
-    Args:
-        logits: (batch, seq_len, num_classes) - Raw outputs from the model head.
-        penalty: The gamma hyperparameter controlling transition smoothness.
+    Vectorized Viterbi decoding to process the entire batch simultaneously.
     """
     batch, seq_len, num_classes = logits.shape
     device = logits.device
     
-    # Convert raw logits to log probabilities (the observation potentials)
+    # Convert raw logits to log probabilities (observation potentials)
     log_probs = torch.log_softmax(logits, dim=-1)
-    # Build our fixed transition matrix
+    
+    # Build fixed transition matrix: (num_classes, num_classes)
     trans_log = build_crf_transition_matrix(num_classes, penalty).to(device) 
+    
+    # Initialize scores for the whole batch at t=0
+    # Shape: (batch, num_classes)
+    score = log_probs[:, 0, :] 
+    backpointers = []
+    
+    # Forward Pass: Sequential over time, but parallel over the batch
+    for t in range(1, seq_len):
+        # Broadcast scores and transitions to compute all possible paths
+        # score.unsqueeze(2): (batch, num_classes_prev, 1)
+        # trans_log.unsqueeze(0): (1, num_classes_prev, num_classes_current)
+        # next_score: (batch, num_classes_prev, num_classes_current)
+        next_score = score.unsqueeze(2) + trans_log.unsqueeze(0)
+        
+        # Max over the previous states (dim=1)
+        # Returns best scores and best states of shape (batch, num_classes_current)
+        best_prev_score, best_prev_state = torch.max(next_score, dim=1)
+        
+        # Add the observation potentials for time t
+        score = best_prev_score + log_probs[:, t, :]
+        backpointers.append(best_prev_state)
+        
+    # Backtracking Pass
     decoded = torch.zeros((batch, seq_len), dtype=torch.long, device=device)
     
-    for b in range(batch):
-        # Start probabilities (uniform relative to each other)
-        score = log_probs[b, 0]
-        backpointers = []
+    # Find the best final state for each sequence in the batch
+    last_state = torch.argmax(score, dim=1) # Shape: (batch,)
+    decoded[:, seq_len - 1] = last_state
+    
+    # Backtrack sequentially over time
+    for t in range(seq_len - 2, -1, -1):
+        # Use torch.gather to fetch the backpointer for the specific last_state of each batch item
+        # backpointers[t] is (batch, num_classes), last_state.unsqueeze(1) is (batch, 1)
+        last_state = backpointers[t].gather(1, last_state.unsqueeze(1)).squeeze(1)
+        decoded[:, t] = last_state
         
-        for t in range(1, seq_len):
-            # score shape: (num_classes, 1) to broadcast across next possible states
-            next_score = score.unsqueeze(1) + trans_log
-            # Find the best previous state for each possible current state
-            best_prev_score, best_prev_state = torch.max(next_score, dim=0)
-            # Add the observation potentials for time t
-            score = best_prev_score + log_probs[b, t]
-            backpointers.append(best_prev_state)
-            
-        # Backtrack to find the optimal path
-        last_state = torch.argmax(score)
-        decoded[b, seq_len - 1] = last_state
-        
-        for t in range(seq_len - 2, -1, -1):
-            last_state = backpointers[t][last_state]
-            decoded[b, t] = last_state
-            
     return decoded
 
 # --- Validation and Evaluation Functions ---
@@ -182,15 +192,16 @@ def run_validation(model, val_dataloader, device, loss_fn):
     return avg_loss
 
 
-def run_evaluation(model, test_dataloader, device, loss_fn, crf_params=None):
+# --- Validation and Evaluation Functions ---
+def run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=None):
     """
-    Runs final evaluation on the test set for a multi-head model.
+    Runs final evaluation on the test set, outputting detailed precision, recall, 
+    and F1-scores to diagnose class imbalance.
     """
     model.eval()
     total_loss = 0
-    # Store predictions and targets for each of the 6 heads
     all_preds = [[] for _ in range(6)]
-    all_crf_preds = [[] for _ in range(6)] if crf_params is not None else None
+    all_crf_preds = [[] for _ in range(6)] if crf_penalty is not None else None
     all_targets = [[] for _ in range(6)]
 
     with torch.no_grad():
@@ -203,55 +214,52 @@ def run_evaluation(model, test_dataloader, device, loss_fn, crf_params=None):
             loss = loss_fn(predictions, target_labels)
             total_loss += loss.item()
 
-            # Get argmax for each head and store results
             for i in range(6):
-                # 1. Standard Argmax (Raw Accuracy)
+                # Standard Argmax
                 predicted_classes = torch.argmax(predictions[i], dim=-1)
                 all_preds[i].extend(predicted_classes.view(-1).cpu().numpy())
                 all_targets[i].extend(target_labels[i].view(-1).cpu().numpy())
 
-                # 2. CRF Smoothed Decoding 
-                # (You can tune the penalty between 1.0 and 5.0 to see what works best)
-                decoded = viterbi_decode_crf(predictions[i], penalty=2.0)
-                all_crf_preds[i].extend(decoded.view(-1).cpu().numpy())
+                # CRF Smoothed Decoding
+                if all_crf_preds is not None:
+                    decoded = viterbi_decode_crf(predictions[i], penalty=crf_penalty)
+                    all_crf_preds[i].extend(decoded.view(-1).cpu().numpy())
 
     avg_loss = total_loss / len(test_dataloader)
     print(f"\n--- Final Test Set Evaluation ---")
-    print(f"Test Loss: {avg_loss:.4f}")
+    print(f"Test Loss: {avg_loss:.4f}\n")
 
-    # Calculate and print accuracy for each head
     head_names = ["Root/Triad", "Bass", "7th", "9th", "11th", "13th"]
-    accuracies = []
-    crf_accuracies = []
-    for i in range(6):
-        preds_np = torch.tensor(all_preds[i])
-        targets_np = torch.tensor(all_targets[i])
-        accuracy = (preds_np == targets_np).float().mean().item()
-        accuracies.append(accuracy)
-        print(f"  - Accuracy (Head {i+1} - {head_names[i]}): {accuracy:.4f}")
-
-        if all_crf_preds is not None:
-            crf_preds_np = torch.tensor(all_crf_preds[i])
-            crf_accuracy = (crf_preds_np == targets_np).float().mean().item()
-            crf_accuracies.append(crf_accuracy)
-            print(f"  - CRF Decoded Accuracy (Head {i+1} - {head_names[i]}): {crf_accuracy:.4f}")
     
-    avg_accuracy = sum(accuracies) / len(accuracies)
-    print(f"Average Head Accuracy: {avg_accuracy:.4f}")
-    if crf_accuracies:
-        avg_crf_accuracy = sum(crf_accuracies) / len(crf_accuracies)
-        print(f"Average CRF Decoded Head Accuracy: {avg_crf_accuracy:.4f}")
-    print("---------------------------------")
-    # For a full implementation, you would combine the head predictions into final
-    # chord labels and use mir_eval for official metrics like WCSR.
-    return avg_loss, accuracies
+    for i in range(6):
+        targets_np = all_targets[i]
+        # Evaluate using CRF predictions if available, otherwise raw argmax
+        preds_to_use = all_crf_preds[i] if all_crf_preds is not None else all_preds[i]
+        
+        # Frame-wise accuracy is standard accuracy
+        acc_frame = accuracy_score(targets_np, preds_to_use)
+        
+        # Class-wise accuracy is equivalent to macro-averaged recall
+        acc_class = recall_score(targets_np, preds_to_use, average='macro', zero_division=0)
+        
+        print(f"=== Head {i+1}: {head_names[i]} ===")
+        print(f"Frame-wise Accuracy (acc_frame): {acc_frame:.4f}")
+        print(f"Class-wise Accuracy (acc_class): {acc_class:.4f}")
+        print("Detailed Report per Class:")
+        
+        # Zero division is set to 0 to prevent warnings if a rare class is never predicted
+        report = classification_report(targets_np, preds_to_use, zero_division=0, digits=4)
+        print(report)
+        print("-" * 50)
+        
+    return avg_loss
 
 
 # --- Main Training Pipeline ---
 def train_model(
-    num_epochs=50, 
+    num_epochs=25, 
     lr=1e-3, 
-    batch_size=24,
+    batch_size=48,
     experiment_name="runs/chordformer_final",
     dataset_root="bello_dataset",
     segment_seconds=10.0,
@@ -293,7 +301,7 @@ def train_model(
     # 3. Build Model, Optimizer, and Loss
     model = build_chordformer().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=3)
     loss_fn = ChordFormerLoss(class_weights=class_weights).to(device)
     
     writer = SummaryWriter(experiment_name)
@@ -336,4 +344,21 @@ def train_model(
 
 
 if __name__ == "__main__":
-    train_model()
+    # train_model()
+    # Run evaluation on epoch 25 model with the fixed CRF penalty of 2.0
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    model = build_chordformer().to(device)
+    model.load_state_dict(torch.load("chordformer_models/2-25_epoch_25_v1.pt", map_location=device))
+    dataset_cfg = PreprocessingConfig(
+        dataset_root="bello_dataset",
+        segment_seconds=10.0,
+        max_songs=None,
+        use_cache=True,
+        refresh_cache=False,
+        cache_dir=".cache/chordformer",
+    )
+    _, _, test_dataloader = create_dataloaders(dataset_cfg, batch_size=48)
+    loss_fn = ChordFormerLoss().to(device)  # Use unweighted loss for evaluation
+    run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=2.0)
