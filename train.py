@@ -257,7 +257,7 @@ def run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=None):
 
 # --- Main Training Pipeline ---
 def train_model(
-    num_epochs=25, 
+    max_epochs=200, # Failsafe limit, training will likely stop before this
     lr=1e-3, 
     batch_size=48,
     experiment_name="runs/chordformer_final",
@@ -268,7 +268,7 @@ def train_model(
     refresh_cache=False,
     cache_dir=".cache/chordformer",
     use_class_weights=True,
-    crf_penalty=2.0, # Replaced crf_smoothing with the fixed transition penalty
+    crf_penalty=2.0, 
 ):
     torch.cuda.empty_cache()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -285,11 +285,9 @@ def train_model(
         cache_dir=cache_dir,
     )
 
-    # 1. Instantiate the dataloaders (Augmentation is handled automatically for the train split)
     train_dataloader, val_dataloader, test_dataloader = create_dataloaders(dataset_cfg, batch_size=batch_size)
     print(f"Data split: {len(train_dataloader.dataset)} train, {len(val_dataloader.dataset)} validation, {len(test_dataloader.dataset)} test samples.")
 
-    # 2. Compute the constrained class weights
     output_dims = [85, 13, 4, 4, 3, 3]
     class_weights = compute_class_weights(
         train_dataloader.dataset, 
@@ -298,18 +296,20 @@ def train_model(
         w_max=10.0
     ) if use_class_weights else None
 
-    # 3. Build Model, Optimizer, and Loss
     model = build_chordformer().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=3)
-    loss_fn = ChordFormerLoss(class_weights=class_weights).to(device)
     
+    # UPDATED: Patience changed from 3 to 5 to match the paper
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5)
+    
+    loss_fn = ChordFormerLoss(class_weights=class_weights).to(device)
     writer = SummaryWriter(experiment_name)
     global_step = 0
     
-    for epoch in range(num_epochs):
+    # UPDATED: Loop over max_epochs, but rely on the early stopping condition
+    for epoch in range(max_epochs):
         model.train()
-        batch_iterator = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}")
+        batch_iterator = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}/{max_epochs}")
         
         for batch in batch_iterator:
             cqt_segments, target_labels = batch
@@ -331,15 +331,25 @@ def train_model(
         val_loss = run_validation(model, val_dataloader, device, loss_fn)
         writer.add_scalar('Loss/validation', val_loss, epoch)
         writer.flush()
+        
+        # Step the scheduler based on validation loss
         scheduler.step(val_loss)
 
         model_filename = f"chordformer_models/epoch_{epoch + 1}.pt"
         torch.save(model.state_dict(), model_filename)
 
+        # UPDATED: Check learning rate for early stopping
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Epoch {epoch + 1} completed. Val Loss: {val_loss:.4f} | Current LR: {current_lr}")
+        
+        if current_lr < 1e-6:
+            print(f"\nLearning rate has dropped below 1e-6 (Current LR: {current_lr}).")
+            print("Training concluded as per paper's early stopping criteria.")
+            break
+
     writer.close()
     print("\nTraining finished.")
     
-    # 4. Final Evaluation with the fixed CRF transition penalty
     run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=crf_penalty)
 
 
