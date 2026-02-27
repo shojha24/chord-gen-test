@@ -354,13 +354,18 @@ def train_model(
 
 
 if __name__ == "__main__":
-    # train_model()
-    # Run evaluation on epoch 25 model with the fixed CRF penalty of 2.0
+    train_model()
+
+    """
+    # To run final evaluation on one of the saved models instead of running the full training loop, you can use the following code snippet. 
+    # Make sure to adjust the model path and dataset configuration as needed.
+    # The test set this is run on should be the same one used during training for a valid evaluation.
+    # This should be the case because the dataset will be cached in .cache/chordformer with the same splits.
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     model = build_chordformer().to(device)
-    model.load_state_dict(torch.load("chordformer_models/2-25_epoch_25_v1.pt", map_location=device))
+    model.load_state_dict(torch.load("chordformer_models/2-26_epoch_43_best.pt", map_location=device))
     dataset_cfg = PreprocessingConfig(
         dataset_root="bello_dataset",
         segment_seconds=10.0,
@@ -372,3 +377,5 @@ if __name__ == "__main__":
     _, _, test_dataloader = create_dataloaders(dataset_cfg, batch_size=48)
     loss_fn = ChordFormerLoss().to(device)  # Use unweighted loss for evaluation
     run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=2.0)
+    """
+
