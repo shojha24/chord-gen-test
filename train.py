@@ -85,28 +85,28 @@ def compute_class_weights(
     
     for _, labels in dataset:
         for i, head_labels in enumerate(labels):
-            # Flatten the labels to 1D before bin counting
-            bincount = torch.bincount(head_labels.view(-1), minlength=output_dims[i]).to(torch.float64)
+            # Flatten the labels to 1D
+            flat_labels = head_labels.view(-1)
+            
+            # FIXED: Filter out the -100 padding tokens before counting!
+            valid_labels = flat_labels[flat_labels >= 0]
+            
+            # Count only the valid classes
+            bincount = torch.bincount(valid_labels, minlength=output_dims[i]).to(torch.float64)
             counts[i] += bincount
 
     # 2. Apply the paper's specific bounding formula
     weights: List[torch.Tensor] = []
     
     for i, count in enumerate(counts):
-        # Find the maximum class frequency for this specific head
         max_count = count.max() 
         if max_count == 0:
-            # Fallback if a head is completely empty (shouldn't happen with real data)
             weights.append(torch.ones(output_dims[i], dtype=torch.float32))
             continue
             
-        # (n_m / max_n)
         ratio = count / max_count
-        # Add epsilon to prevent 0^(-gamma), which evaluates to infinity
         ratio = torch.clamp(ratio, min=eps)
-        # (ratio)^(-gamma)
         w = ratio ** (-gamma)
-        # Clamp to w_max
         w = torch.clamp(w, max=w_max)
         weights.append(w.to(torch.float32))
         
