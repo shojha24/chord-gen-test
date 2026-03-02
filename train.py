@@ -84,8 +84,14 @@ def compute_class_weights(
     
     for _, labels in dataset:
         for i, head_labels in enumerate(labels):
-            # Flatten the labels to 1D before bin counting
-            bincount = torch.bincount(head_labels.view(-1), minlength=output_dims[i]).to(torch.float64)
+            # Flatten the labels to 1D
+            flat_labels = head_labels.view(-1)
+            
+            # FIXED: Filter out the -100 padding tokens before counting!
+            valid_labels = flat_labels[flat_labels >= 0]
+            
+            # Count only the valid classes
+            bincount = torch.bincount(valid_labels, minlength=output_dims[i]).to(torch.float64)
             counts[i] += bincount
 
     # 2. Apply the paper's specific bounding formula
