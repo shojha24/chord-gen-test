@@ -328,6 +328,10 @@ def _chunk_song(
     label_chunks: List[List[np.ndarray]] = []
 
     n_frames = cqt.shape[0]
+    
+    # NEW: Find the actual "silence" value of this specific CQT to use as padding
+    pad_value = cqt.min() if n_frames > 0 else -80.0 
+
     for start in range(0, n_frames, segment_frames):
         end = min(start + segment_frames, n_frames)
         feat = cqt[start:end]
@@ -335,8 +339,12 @@ def _chunk_song(
 
         if end - start < segment_frames:
             pad = segment_frames - (end - start)
-            feat = np.pad(feat, ((0, pad), (0, 0)), mode="constant")
-            labs = [np.pad(head, (0, pad), mode="constant", constant_values=0) for head in labs]
+            
+            # FIXED: Pad with silence (negative dB), not max volume (0)
+            feat = np.pad(feat, ((0, pad), (0, 0)), mode="constant", constant_values=pad_value)
+            
+            # FIXED: Pad with -100 so CrossEntropyLoss ignores these frames
+            labs = [np.pad(head, (0, pad), mode="constant", constant_values=-100) for head in labs]
 
         feature_chunks.append(feat)
         label_chunks.append(labs)

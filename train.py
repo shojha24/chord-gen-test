@@ -5,7 +5,7 @@ from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 from tqdm import tqdm
 from typing import List, Optional
-from chordformer_model import build_chordformer 
+from mambaformer_model import build_chordformer 
 from preprocessing import PreprocessingConfig, create_dataloaders
 from sklearn.metrics import classification_report, recall_score, accuracy_score
 
@@ -38,7 +38,7 @@ class ChordFormerLoss(nn.Module):
     """
     Computes the weighted cross-entropy loss across all 6 chord component heads.
     """
-    def __init__(self, class_weights: Optional[List[torch.Tensor]] = None):
+    def __init__(self, class_weights: Optional[List[torch.Tensor]] = None, ignore_index: int = -100):
         super(ChordFormerLoss, self).__init__()
         
         # Using nn.ModuleList automatically handles pushing the loss functions 
@@ -47,10 +47,10 @@ class ChordFormerLoss(nn.Module):
         
         if class_weights:
             for weights in class_weights:
-                self.loss_functions.append(nn.CrossEntropyLoss(weight=weights))
+                self.loss_functions.append(nn.CrossEntropyLoss(weight=weights, ignore_index=ignore_index))
         else:
             for _ in range(6):  
-                self.loss_functions.append(nn.CrossEntropyLoss())
+                self.loss_functions.append(nn.CrossEntropyLoss(ignore_index=ignore_index))
 
     def forward(self, predictions: List[torch.Tensor], targets: List[torch.Tensor]) -> torch.Tensor:
         total_loss = 0.0
@@ -259,10 +259,10 @@ def run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=None):
 def train_model(
     max_epochs=200, # Failsafe limit, training will likely stop before this
     lr=1e-3, 
-    batch_size=48,
+    batch_size=16,
     experiment_name="runs/chordformer_final",
     dataset_root="bello_dataset",
-    segment_seconds=10.0,
+    segment_seconds=60.0,
     max_songs=None,
     use_cache=True,
     refresh_cache=False,
