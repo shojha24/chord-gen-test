@@ -485,7 +485,7 @@ class BelloChordFormerDataset(Dataset):
         return cqt, targets
 
 # --- Dataset Instantiation & Splitting Logic ---
-def create_dataloaders(cfg: PreprocessingConfig, batch_size: int = 24):
+def create_dataloaders(cfg: PreprocessingConfig, batch_size: int = 24, num_workers: int = 4):
     all_pairs = find_audio_lab_pairs(cfg.dataset_root)
     if cfg.max_songs is not None:
         all_pairs = all_pairs[:cfg.max_songs]
@@ -509,9 +509,10 @@ def create_dataloaders(cfg: PreprocessingConfig, batch_size: int = 24):
     val_ds = BelloChordFormerDataset(val_pairs, cfg, augment=False, split_name="val")
     test_ds = BelloChordFormerDataset(test_pairs, cfg, augment=False, split_name="test")
     
-    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
-    test_dl = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+    # FIXED: Added multiprocessing and pinned memory for WSL speed!
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    test_dl = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     
     return train_dl, val_dl, test_dl
 
