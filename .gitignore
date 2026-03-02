@@ -10,3 +10,4 @@ bello_dataset
 music_models
 *.sf2
 .cache
+*.deb

@@ -38,19 +38,20 @@ class ChordFormerLoss(nn.Module):
     """
     Computes the weighted cross-entropy loss across all 6 chord component heads.
     """
-    def __init__(self, class_weights: Optional[List[torch.Tensor]] = None):
+    def __init__(self, class_weights: Optional[List[torch.Tensor]] = None, ignore_index: int = -100):
         super(ChordFormerLoss, self).__init__()
         
         # Using nn.ModuleList automatically handles pushing the loss functions 
         # (and their internal weight tensors) to the correct GPU/device
         self.loss_functions = nn.ModuleList()
+        self.ignore_index = ignore_index
         
         if class_weights:
             for weights in class_weights:
-                self.loss_functions.append(nn.CrossEntropyLoss(weight=weights))
+                self.loss_functions.append(nn.CrossEntropyLoss(weight=weights, ignore_index=self.ignore_index))
         else:
             for _ in range(6):  
-                self.loss_functions.append(nn.CrossEntropyLoss())
+                self.loss_functions.append(nn.CrossEntropyLoss(ignore_index=self.ignore_index))
 
     def forward(self, predictions: List[torch.Tensor], targets: List[torch.Tensor]) -> torch.Tensor:
         total_loss = 0.0
