@@ -265,10 +265,10 @@ def run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=None):
 def train_model(
     max_epochs=200, # Failsafe limit, training will likely stop before this
     lr=1e-3, 
-    batch_size=16,
+    batch_size=48,
     experiment_name="runs/chordformer_final",
     dataset_root="bello_dataset",
-    segment_seconds=60.0,
+    segment_seconds=10.0,
     max_songs=None,
     use_cache=True,
     refresh_cache=False,
@@ -360,9 +360,9 @@ def train_model(
 
 
 if __name__ == "__main__":
-    train_model()
+    # train_model()
 
-    """
+    
     # To run final evaluation on one of the saved models instead of running the full training loop, you can use the following code snippet. 
     # Make sure to adjust the model path and dataset configuration as needed.
     # The test set this is run on should be the same one used during training for a valid evaluation.
@@ -371,7 +371,7 @@ if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     model = build_chordformer().to(device)
-    model.load_state_dict(torch.load("chordformer_models/2-26_epoch_43_best.pt", map_location=device))
+    model.load_state_dict(torch.load("chordformer_models/3-2_epoch_31_best.pt", map_location=device))
     dataset_cfg = PreprocessingConfig(
         dataset_root="bello_dataset",
         segment_seconds=10.0,
@@ -383,5 +383,4 @@ if __name__ == "__main__":
     _, _, test_dataloader = create_dataloaders(dataset_cfg, batch_size=48)
     loss_fn = ChordFormerLoss().to(device)  # Use unweighted loss for evaluation
     run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=2.0)
-    """
 

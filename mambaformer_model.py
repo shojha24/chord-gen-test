@@ -34,7 +34,9 @@ class FeedForwardModule(nn.Module):
 
 class MambaSequenceModule(nn.Module):
     """
-    The Mamba replacement for Multi-Head Self-Attention.
+    The Bidirectional Mamba replacement for Multi-Head Self-Attention.
+    Processes the sequence both forward and backward in time, concatenates 
+    the results, and projects them back to the original dimension.
     Retains the pre-LayerNorm and residual connection structure to match 
     the original Conformer block design.
     """
@@ -42,19 +44,47 @@ class MambaSequenceModule(nn.Module):
         super(MambaSequenceModule, self).__init__()
         self.layer_norm = nn.LayerNorm(dim)
         
-        # The core Mamba block
-        self.mamba = Mamba(
-            d_model=dim,      # Model dimension (model_dim)
-            d_state=d_state,  # SSM state expansion factor (typically 16)
-            d_conv=d_conv,    # Local convolution width
-            expand=expand,    # Block expansion factor
+        # We need two independent Mamba blocks to learn forward and backward patterns
+        self.mamba_forward = Mamba(
+            d_model=dim,      
+            d_state=d_state,  
+            d_conv=d_conv,    
+            expand=expand,    
         )
+        
+        self.mamba_backward = Mamba(
+            d_model=dim,      
+            d_state=d_state,  
+            d_conv=d_conv,    
+            expand=expand,    
+        )
+        
+        # Because we concatenate the two outputs (dim + dim = 2*dim), 
+        # we need a linear layer to project it back down to the model dimension
+        self.out_proj = nn.Linear(dim * 2, dim)
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, x):
         residual = x
         x = self.layer_norm(x)
-        x = self.mamba(x)
+        
+        # 1. Forward Pass
+        out_forward = self.mamba_forward(x)
+        
+        # 2. Backward Pass
+        # We flip the sequence along the time dimension (dim=1)
+        x_flipped = torch.flip(x, dims=[1])
+        out_backward = self.mamba_backward(x_flipped)
+        # Flip the output back to normal chronological order
+        out_backward = torch.flip(out_backward, dims=[1])
+        
+        # 3. Concatenation and Projection
+        # Concatenate along the feature dimension (dim=2)
+        out_concat = torch.cat([out_forward, out_backward], dim=2)
+        
+        # Project back down to the original model dimension
+        x = self.out_proj(out_concat)
+        
         x = self.dropout(x)
         return residual + x
 
