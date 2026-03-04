@@ -61,6 +61,21 @@ class ChordFormerLoss(nn.Module):
                 )
             )
 
+    def forward(self, predictions: List[torch.Tensor], targets: List[torch.Tensor]) -> torch.Tensor:
+        total_loss = 0.0
+        
+        for i, (pred, target) in enumerate(zip(predictions, targets)):
+            # Flatten predictions: (batch, seq_len, num_classes) -> (batch * seq_len, num_classes)
+            pred_flat = pred.view(-1, pred.size(-1))
+            # Flatten targets: (batch, seq_len) -> (batch * seq_len)
+            target_flat = target.view(-1)
+            
+            # Accumulate the loss for this head
+            loss_fn = self.loss_functions[i]
+            total_loss += loss_fn(pred_flat, target_flat)
+            
+        return total_loss
+
 
 def compute_class_weights(
     dataset, 
