@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
@@ -33,34 +34,66 @@ class ChordFormerDataset(Dataset):
         return cqt_segment, target_labels
 """
 
+class FocalLoss(nn.Module):
+    """
+    Multi-class Focal Loss that supports class weights and ignore_index.
+    Formula: FL(p_t) = -alpha * (1 - p_t)^gamma * log(p_t)
+    """
+    def __init__(self, weight=None, gamma=2.0, ignore_index=-100):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.ignore_index = ignore_index
+        # Register weight as a buffer so it moves to the correct GPU automatically
+        self.register_buffer('weight', weight)
+
+    def forward(self, inputs, targets):
+        # 1. Compute standard cross entropy loss (unreduced)
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none', ignore_index=self.ignore_index)
+        
+        # 2. Compute the probability of the true class (p_t)
+        pt = torch.exp(-ce_loss)
+        
+        # 3. Apply the focal loss modulating factor: (1 - p_t)^gamma
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+        
+        # 4. Apply class weights (alpha) if provided
+        if self.weight is not None:
+            # Temporarily replace ignore_index with 0 so we can safely index the weight tensor
+            safe_targets = torch.where(targets == self.ignore_index, 0, targets)
+            alpha = self.weight[safe_targets]
+            focal_loss = alpha * focal_loss
+            
+            # Re-apply the ignore mask (since safe_targets removed it)
+            focal_loss = torch.where(targets == self.ignore_index, 0.0, focal_loss)
+
+        # 5. Return the mean over valid (non-ignored) frames
+        valid_mask = targets != self.ignore_index
+        return focal_loss.sum() / valid_mask.sum().clamp(min=1)
+
 # --- Custom Loss Function ---
 class ChordFormerLoss(nn.Module):
     """
-    Computes the weighted cross-entropy loss across all 6 chord component heads.
+    Computes the weighted Focal Loss across all 6 chord component heads.
     """
-    def __init__(self, class_weights: Optional[List[torch.Tensor]] = None, ignore_index: int = -100):
+    def __init__(self, class_weights: Optional[List[torch.Tensor]] = None, ignore_index: int = -100, gamma: float = 2.0):
         super(ChordFormerLoss, self).__init__()
         
-        # Using nn.ModuleList automatically handles pushing the loss functions 
-        # (and their internal weight tensors) to the correct GPU/device
         self.loss_functions = nn.ModuleList()
         
         if class_weights:
             for weights in class_weights:
-                self.loss_functions.append(nn.CrossEntropyLoss(weight=weights, ignore_index=ignore_index))
+                self.loss_functions.append(FocalLoss(weight=weights, gamma=gamma, ignore_index=ignore_index))
         else:
             for _ in range(6):  
-                self.loss_functions.append(nn.CrossEntropyLoss(ignore_index=ignore_index))
+                self.loss_functions.append(FocalLoss(weight=None, gamma=gamma, ignore_index=ignore_index))
 
     def forward(self, predictions: List[torch.Tensor], targets: List[torch.Tensor]) -> torch.Tensor:
         total_loss = 0.0
         
         for i, (pred, target) in enumerate(zip(predictions, targets)):
-            # Flatten predictions: (batch, seq_len, num_classes) -> (batch * seq_len, num_classes)
             pred_flat = pred.view(-1, pred.size(-1))
-            # Flatten targets: (batch, seq_len) -> (batch * seq_len)
             target_flat = target.view(-1)
-            # Accumulate the loss for this head
+            
             loss_fn = self.loss_functions[i]
             total_loss += loss_fn(pred_flat, target_flat)
             
@@ -308,7 +341,7 @@ def train_model(
     # UPDATED: Patience changed from 3 to 5 to match the paper
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5)
     
-    loss_fn = ChordFormerLoss(class_weights=class_weights).to(device)
+    loss_fn = ChordFormerLoss(class_weights=class_weights, gamma=2.0).to(device)
     writer = SummaryWriter(experiment_name)
     global_step = 0
     
@@ -360,9 +393,9 @@ def train_model(
 
 
 if __name__ == "__main__":
-    # train_model()
-
+    train_model()
     
+    """
     # To run final evaluation on one of the saved models instead of running the full training loop, you can use the following code snippet. 
     # Make sure to adjust the model path and dataset configuration as needed.
     # The test set this is run on should be the same one used during training for a valid evaluation.
@@ -383,4 +416,4 @@ if __name__ == "__main__":
     _, _, test_dataloader = create_dataloaders(dataset_cfg, batch_size=48)
     loss_fn = ChordFormerLoss().to(device)  # Use unweighted loss for evaluation
     run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=2.0)
-
+    """
