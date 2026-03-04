@@ -36,35 +36,30 @@ class ChordFormerDataset(Dataset):
 # --- Custom Loss Function ---
 class ChordFormerLoss(nn.Module):
     """
-    Computes the weighted cross-entropy loss across all 6 chord component heads.
+    Computes the weighted cross-entropy loss across all 6 chord component heads,
+    utilizing head-specific label smoothing to emulate consonance-based forgiveness.
     """
     def __init__(self, class_weights: Optional[List[torch.Tensor]] = None, ignore_index: int = -100):
         super(ChordFormerLoss, self).__init__()
         
-        # Using nn.ModuleList automatically handles pushing the loss functions 
-        # (and their internal weight tensors) to the correct GPU/device
         self.loss_functions = nn.ModuleList()
         
-        if class_weights:
-            for weights in class_weights:
-                self.loss_functions.append(nn.CrossEntropyLoss(weight=weights, ignore_index=ignore_index))
-        else:
-            for _ in range(6):  
-                self.loss_functions.append(nn.CrossEntropyLoss(ignore_index=ignore_index))
-
-    def forward(self, predictions: List[torch.Tensor], targets: List[torch.Tensor]) -> torch.Tensor:
-        total_loss = 0.0
+        # Define the smoothing factors for each of the 6 heads
+        # [Root/Triad, Bass, 7th, 9th, 11th, 13th]
+        smoothing_factors = [0.01, 0.01, 0.10, 0.10, 0.10, 0.10]
         
-        for i, (pred, target) in enumerate(zip(predictions, targets)):
-            # Flatten predictions: (batch, seq_len, num_classes) -> (batch * seq_len, num_classes)
-            pred_flat = pred.view(-1, pred.size(-1))
-            # Flatten targets: (batch, seq_len) -> (batch * seq_len)
-            target_flat = target.view(-1)
-            # Accumulate the loss for this head
-            loss_fn = self.loss_functions[i]
-            total_loss += loss_fn(pred_flat, target_flat)
+        for i in range(6):  
+            # Extract the specific weight tensor for this head if weights are provided
+            weight = class_weights[i] if class_weights else None
             
-        return total_loss
+            # Initialize CrossEntropyLoss with the specific smoothing factor for this head
+            self.loss_functions.append(
+                nn.CrossEntropyLoss(
+                    weight=weight, 
+                    ignore_index=ignore_index,
+                    label_smoothing=smoothing_factors[i]
+                )
+            )
 
 
 def compute_class_weights(
