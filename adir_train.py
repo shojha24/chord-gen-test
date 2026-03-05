@@ -161,8 +161,11 @@ def train_adir(
                         
             train_pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
+
         # --- Dynamic Weight Update for Next Epoch ---
         new_class_weights = []
+        w_max = 10.0  # THE CEILING: Matches baseline's maximum penalty
+        
         for i in range(6):
             D = epoch_diversities[i]
             # Replace 0s with 1s to prevent division by zero for absent classes
@@ -172,6 +175,10 @@ def train_adir(
             inv_D = 1.0 / D
             sum_inv_D = inv_D.sum()
             weight = (inv_D / sum_inv_D) * output_dims[i]
+            
+            # --- NEW: CLAMP THE WEIGHTS ---
+            weight = torch.clamp(weight, max=w_max)
+            
             new_class_weights.append(weight.to(device))
             
         # Swap out the loss function entirely with the newly calculated ADIR weights
@@ -208,4 +215,26 @@ def train_adir(
     run_evaluation(model, test_loader, device, eval_loss_fn, crf_penalty=crf_penalty)
 
 if __name__ == "__main__":
-    train_adir()
+    # train_adir()
+
+    
+    # To run final evaluation on one of the saved models instead of running the full training loop, you can use the following code snippet. 
+    # Make sure to adjust the model path and dataset configuration as needed.
+    # The test set this is run on should be the same one used during training for a valid evaluation.
+    # This should be the case because the dataset will be cached in .cache/chordformer with the same splits.
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    model = build_chordformer().to(device)
+    model.load_state_dict(torch.load("chordformer_models/adir_finetuned/adir_best.pt", map_location=device))
+    dataset_cfg = PreprocessingConfig(
+        dataset_root="bello_dataset",
+        segment_seconds=10.0,
+        max_songs=None,
+        use_cache=True,
+        refresh_cache=False,
+        cache_dir=".cache/chordformer",
+    )
+    _, _, test_dataloader = create_dataloaders(dataset_cfg, batch_size=48)
+    loss_fn = ChordFormerLoss().to(device)  # Use unweighted loss for evaluation
+    run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=2.0)
