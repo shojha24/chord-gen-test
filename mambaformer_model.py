@@ -184,7 +184,7 @@ class ChordFormer(nn.Module):
             nn.Linear(model_dim, out_dim) for out_dim in output_dims
         ])
 
-    def forward(self, x):
+    def forward(self, x, return_latents=False):
         x = self.input_projection(x)
         x = self.dropout(x)
 
@@ -192,6 +192,9 @@ class ChordFormer(nn.Module):
             x = layer(x)
         
         outputs = [head(x) for head in self.output_heads]
+
+        if return_latents:
+            return x, outputs  # Return both the outputs and the final latent representation
         return outputs
 
 
