@@ -204,6 +204,7 @@ def run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=None):
     Runs final evaluation on the test set, outputting detailed precision, recall, 
     and F1-scores to diagnose class imbalance.
     """
+    
     model.eval()
     total_loss = 0
     all_preds = [[] for _ in range(6)]
@@ -368,10 +369,11 @@ if __name__ == "__main__":
     # The test set this is run on should be the same one used during training for a valid evaluation.
     # This should be the case because the dataset will be cached in .cache/chordformer with the same splits.
 
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     model = build_chordformer().to(device)
-    model.load_state_dict(torch.load("chordformer_models/3-19_epoch_33_best.pt", map_location=device))
+    model.load_state_dict(torch.load("chordformer_models/3-20_epoch_20_best.pt", map_location=device))
     dataset_cfg = PreprocessingConfig(
         dataset_root="bello_dataset",
         segment_seconds=10.0,
@@ -383,4 +385,5 @@ if __name__ == "__main__":
     _, _, test_dataloader = create_dataloaders(dataset_cfg, batch_size=48)
     loss_fn = ChordFormerLoss().to(device)  # Use unweighted loss for evaluation
     run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=2.0)
+    
 

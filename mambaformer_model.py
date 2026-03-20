@@ -33,6 +33,50 @@ class FeedForwardModule(nn.Module):
         return residual + x
 
 
+class PitchAwareEmbedding(nn.Module):
+    """
+    Replaces the standard linear input projection.
+    Uses a 1D Convolution across the vertical pitch axis to explicitly 
+    capture harmonic intervals (like octaves) before sequence modeling.
+    """
+    def __init__(self, input_dim=252, model_dim=256, bins_per_semitone=3):
+        super(PitchAwareEmbedding, self).__init__()
+        
+        bins_per_octave = 12 * bins_per_semitone # 36
+        
+        # REMOVED padding="same" to avoid the CUDA memory crash
+        self.pitch_filter = nn.Conv1d(
+            in_channels=1, 
+            out_channels=4, 
+            kernel_size=bins_per_octave, 
+            padding=0 # We will handle padding manually in the forward pass
+        )
+        self.activation = nn.SiLU()
+        self.projection = nn.Linear(4 * input_dim, model_dim)
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self, x):
+        # x shape: (Batch, Time, Pitch)
+        B, T, P = x.shape
+        
+        x = x.view(B * T, 1, P)
+        
+        # EXPLICIT ASYMMETRIC PADDING: Left=17, Right=18 (Total 35)
+        # Input length (252) + Padding (35) = 287. 
+        # After Kernel (36): 287 - 36 + 1 = 252.
+        x_padded = F.pad(x, (17, 18), mode="constant", value=0.0)
+        
+        x_filtered = self.pitch_filter(x_padded) 
+        x_filtered = self.activation(x_filtered)
+        
+        x_flat = x_filtered.view(B, T, 4 * P)
+        
+        out = self.projection(x_flat)
+        out = self.dropout(out)
+        
+        return out
+
+
 class MambaSequenceModule(nn.Module):
     """
     The Bidirectional Mamba replacement for Multi-Head Self-Attention.
@@ -113,8 +157,7 @@ class ChordFormer(nn.Module):
                  dropout_rate: float = 0.1):
         super(ChordFormer, self).__init__()
         
-        self.input_projection = nn.Linear(input_dim, model_dim)
-        self.dropout = nn.Dropout(dropout_rate)
+        self.input_projection = PitchAwareEmbedding(input_dim=input_dim, model_dim=model_dim)
 
         # Using the streamlined Minimal MambaformerBlock
         self.conformer_layers = nn.ModuleList([
@@ -131,7 +174,6 @@ class ChordFormer(nn.Module):
 
     def forward(self, x):
         x = self.input_projection(x)
-        x = self.dropout(x)
 
         for layer in self.conformer_layers:
             x = layer(x)
