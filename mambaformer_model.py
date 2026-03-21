@@ -1,3 +1,9 @@
+"""
+mambaformer_model.py
+======================
+This module defines the Mambaformer architecture, a streamlined version of the Conformer model that replaces multi-head self-attention with the bidirectional Mamba sequence module. 
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

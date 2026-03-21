@@ -1,3 +1,15 @@
+"""
+preprocessing.py
+======================
+This module handles all data preprocessing tasks for the Bello Chord Dataset, including:
+- Parsing Harte chord labels into structured multi-head targets
+- Computing CQT features from raw audio
+- Aligning chord labels to CQT frames
+- Segmenting songs into fixed-length chunks with appropriate padding
+- Caching preprocessed datasets for efficient loading during training
+- Applying data augmentation (random pitch shifts) on-the-fly during training
+"""
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
