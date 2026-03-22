@@ -54,6 +54,7 @@ from evaluation import (
 from preprocessing import (
     BelloChordFormerDataset,
     PreprocessingConfig,
+    precompute_song_cache,
 )
 # CRF helpers live in chord_utils (not here) to avoid a circular import
 # with evaluation.py.  Re-export for callers that expect them here.
@@ -117,7 +118,16 @@ def build_dataloaders(
     num_workers: int = 4,
     fold_num:    int = 1,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """Build DataLoaders for one fold using fold-aware cache names."""
+    """
+    Build DataLoaders for one fold.
+
+    precompute_song_cache is called first on the union of all three splits.
+    It skips songs already cached, so from fold 2 onwards this is a no-op.
+    BelloChordFormerDataset then assembles each split by loading the cached
+    per-song files — no CQT computation happens inside the Dataset.
+    """
+    precompute_song_cache(train_pairs + val_pairs + test_pairs, cfg)
+
     train_ds = BelloChordFormerDataset(
         train_pairs, cfg, augment=True,  split_name=f"fold{fold_num}_train"
     )
@@ -215,10 +225,10 @@ def compute_class_weights(
 # ---------------------------------------------------------------------------
 
 def run_validation(
-    model:     nn.Module,
-    val_dl:    DataLoader,
-    device:    torch.device,
-    loss_fn:   nn.Module,
+    model:   nn.Module,
+    val_dl:  DataLoader,
+    device:  torch.device,
+    loss_fn: nn.Module,
 ) -> float:
     model.eval()
     total = 0.0
@@ -417,10 +427,10 @@ def run_cross_validation(
 
         train_dl, val_dl, test_dl = build_dataloaders(
             train_pairs, val_pairs, test_pairs,
-            cfg        = cfg,
-            batch_size = batch_size,
-            num_workers= num_workers,
-            fold_num   = fold_num,
+            cfg         = cfg,
+            batch_size  = batch_size,
+            num_workers = num_workers,
+            fold_num    = fold_num,
         )
 
         fold_scores = train_one_fold(
@@ -478,9 +488,9 @@ def aggregate_scores(
 # ---------------------------------------------------------------------------
 
 def save_comparison_report(
-    results:          Dict[str, Dict[str, Dict[str, float]]],
-    all_fold_scores:  Dict[str, List[Dict[str, float]]],
-    output_dir:       str = ".",
+    results:         Dict[str, Dict[str, Dict[str, float]]],
+    all_fold_scores: Dict[str, List[Dict[str, float]]],
+    output_dir:      str = ".",
 ) -> Tuple[str, str]:
     """
     Save a side-by-side CSV and Markdown comparison report.
@@ -532,7 +542,6 @@ def save_comparison_report(
             "Values reported as **mean ± std** (min / max).\n\n"
         )
 
-        # ---- Summary table --------------------------------------------------
         cols = ["Tier"] + [f"{n} (mean ± std)" for n in model_names]
         fh.write("| " + " | ".join(cols) + " |\n")
         fh.write("|" + "|".join(["---"] * len(cols)) + "|\n")
@@ -553,11 +562,12 @@ def save_comparison_report(
                     )
             fh.write("| " + " | ".join(row_parts) + " |\n")
 
-        # ---- Per-fold tables ------------------------------------------------
         fh.write("\n## Per-fold scores\n\n")
         for name in model_names:
             fh.write(f"### {name}\n\n")
-            fold_headers = ["Tier"] + [f"Fold {k+1}" for k in range(n_folds)] + ["Mean", "Std"]
+            fold_headers = (
+                ["Tier"] + [f"Fold {k+1}" for k in range(n_folds)] + ["Mean", "Std"]
+            )
             fh.write("| " + " | ".join(fold_headers) + " |\n")
             fh.write("|" + "|".join(["---"] * len(fold_headers)) + "|\n")
 
@@ -566,7 +576,7 @@ def save_comparison_report(
                     fs.get(tier, float("nan"))
                     for fs in all_fold_scores.get(name, [])
                 ]
-                valid = [v for v in fold_vals if not np.isnan(v)]
+                valid    = [v for v in fold_vals if not np.isnan(v)]
                 mean_str = f"{np.mean(valid):.4f}" if valid else "n/a"
                 std_str  = f"{np.std(valid, ddof=0):.4f}" if valid else "n/a"
                 cells    = [
@@ -574,7 +584,9 @@ def save_comparison_report(
                     for v in fold_vals
                 ]
                 fh.write(
-                    "| " + " | ".join([f"**{tier}**"] + cells + [mean_str, std_str]) + " |\n"
+                    "| " + " | ".join(
+                        [f"**{tier}**"] + cells + [mean_str, std_str]
+                    ) + " |\n"
                 )
             fh.write("\n")
 
