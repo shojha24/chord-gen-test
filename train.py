@@ -9,6 +9,7 @@ from mambaformer_model import build_chordformer
 from preprocessing import PreprocessingConfig, create_dataloaders
 from sklearn.metrics import classification_report, recall_score, accuracy_score
 
+torch.set_float32_matmul_precision('high')
 
 """
 # --- 1. Placeholder Dataset (Unchanged) ---
@@ -190,9 +191,14 @@ def run_validation(model, val_dataloader, device, loss_fn):
             cqt_segments, target_labels = batch
             cqt_segments = cqt_segments.to(device)
             target_labels = [label.to(device) for label in target_labels]
-            predictions = model(cqt_segments)
-            loss = loss_fn(predictions, target_labels)
+            
+            # NEW: Wrap validation in mixed precision too
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                predictions = model(cqt_segments)
+                loss = loss_fn(predictions, target_labels)
+            
             total_val_loss += loss.item()
+            
     avg_loss = total_val_loss / len(val_dataloader)
     print(f"Validation Loss: {avg_loss:.4f}")
     return avg_loss
@@ -266,7 +272,8 @@ def run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=None):
 def train_model(
     max_epochs=200, # Failsafe limit, training will likely stop before this
     lr=1e-3, 
-    batch_size=48,
+    batch_size=8,             # REDUCED from 48 to fit 6GB VRAM
+    accumulation_steps=6,     # NEW: 8 x 6 = 48 (Keeps your effective batch size the same)
     experiment_name="runs/chordformer_final",
     dataset_root="bello_dataset",
     segment_seconds=10.0,
@@ -313,26 +320,52 @@ def train_model(
     writer = SummaryWriter(experiment_name)
     global_step = 0
     
-    # UPDATED: Loop over max_epochs, but rely on the early stopping condition
+    # NEW: Initialize the Mixed Precision Scaler
+    scaler = torch.amp.GradScaler('cuda') 
+    
     for epoch in range(max_epochs):
         model.train()
         batch_iterator = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}/{max_epochs}")
         
-        for batch in batch_iterator:
+        # NEW: Clear gradients at the start of the epoch
+        optimizer.zero_grad() 
+        
+        for i, batch in enumerate(batch_iterator):
             cqt_segments, target_labels = batch
             cqt_segments = cqt_segments.to(device)
             target_labels = [label.to(device) for label in target_labels]
             
-            predictions = model(cqt_segments)
-            loss = loss_fn(predictions, target_labels)
+            # NEW: Run the forward pass in bfloat16 mixed precision
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                predictions = model(cqt_segments)
+                loss = loss_fn(predictions, target_labels)
+                
+                # NEW: Divide the loss by the number of accumulation steps 
+                # so the math stays balanced over the accumulated batches
+                loss = loss / accumulation_steps
             
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            # NEW: Scale the loss and accumulate gradients backward
+            scaler.scale(loss).backward()
+            
+            # NEW: Only step the optimizer every `accumulation_steps` batches
+            # (or on the very last batch of the dataset)
+            if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_dataloader):
+                
+                # Unscale before clipping gradients
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                # Step the optimizer and update the scaler
+                scaler.step(optimizer)
+                scaler.update()
+                
+                # Clear the accumulated gradients for the next cycle
+                optimizer.zero_grad()
 
-            batch_iterator.set_postfix(loss=loss.item())
-            writer.add_scalar('Loss/train', loss.item(), global_step)
+            # Note: We multiply by accumulation_steps for the printout so you 
+            # see the "true" loss magnitude on Tensorboard, not the divided one.
+            batch_iterator.set_postfix(loss=(loss.item() * accumulation_steps))
+            writer.add_scalar('Loss/train', (loss.item() * accumulation_steps), global_step)
             global_step += 1
 
         val_loss = run_validation(model, val_dataloader, device, loss_fn)
@@ -373,7 +406,7 @@ if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     model = build_chordformer().to(device)
-    model.load_state_dict(torch.load("chordformer_models/3-20_epoch_20_best.pt", map_location=device))
+    model.load_state_dict(torch.load("chordformer_models/4-30_epoch_30_best.pt", map_location=device))
     dataset_cfg = PreprocessingConfig(
         dataset_root="bello_dataset",
         segment_seconds=10.0,
@@ -386,4 +419,4 @@ if __name__ == "__main__":
     loss_fn = ChordFormerLoss().to(device)  # Use unweighted loss for evaluation
     run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=2.0)
     
-
+    
