@@ -80,10 +80,9 @@ class PitchAwareEmbedding(nn.Module):
 class MambaSequenceModule(nn.Module):
     """
     The Bidirectional Mamba replacement for Multi-Head Self-Attention.
-    Processes the sequence both forward and backward in time, concatenates 
-    the results, and projects them back to the original dimension.
     """
-    def __init__(self, dim, d_state=16, d_conv=4, expand=2, dropout_rate=0.1):
+    # UPDATED DEFAULTS: d_state=64, d_conv=4, expand=4
+    def __init__(self, dim, d_state=64, d_conv=4, expand=4, dropout_rate=0.1):
         super(MambaSequenceModule, self).__init__()
         self.layer_norm = nn.LayerNorm(dim)
         
@@ -130,10 +129,18 @@ class MambaformerBlock(nn.Module):
     The Minimal Mambaformer Block: Mamba -> FFN -> LayerNorm
     (Removed heavy Conformer convolutions and Macaron topology).
     """
-    def __init__(self, dim, ffn_expansion_factor=4, dropout_rate=0.1):
+    # NEW: Accept the mamba-specific parameters here so they pass down
+    def __init__(self, dim, d_state=64, d_conv=4, expand=4, ffn_expansion_factor=4, dropout_rate=0.1):
         super(MambaformerBlock, self).__init__()
         
-        self.sequence_module = MambaSequenceModule(dim, dropout_rate=dropout_rate)
+        # Pass the fat state parameters into the sequence module
+        self.sequence_module = MambaSequenceModule(
+            dim, 
+            d_state=d_state, 
+            d_conv=d_conv, 
+            expand=expand, 
+            dropout_rate=dropout_rate
+        )
         self.ffn = FeedForwardModule(dim, ffn_expansion_factor, dropout_rate)
         self.final_layer_norm = nn.LayerNorm(dim)
 
@@ -153,6 +160,9 @@ class ChordFormer(nn.Module):
                  model_dim: int, 
                  num_layers: int, 
                  output_dims: List[int],
+                 d_state: int = 64,          # NEW
+                 d_conv: int = 4,
+                 expand: int = 4,            # NEW
                  ffn_expansion_factor: int = 4, 
                  dropout_rate: float = 0.1):
         super(ChordFormer, self).__init__()
@@ -163,6 +173,9 @@ class ChordFormer(nn.Module):
         self.conformer_layers = nn.ModuleList([
             MambaformerBlock(
                 dim=model_dim,
+                d_state=d_state,     # NEW
+                d_conv=d_conv,       # NEW
+                expand=expand,       # NEW
                 ffn_expansion_factor=ffn_expansion_factor,
                 dropout_rate=dropout_rate
             ) for _ in range(num_layers)
@@ -187,27 +200,24 @@ def build_chordformer(
     model_dim: int = 256,
     num_layers: int = 4,
     output_dims: Optional[List[int]] = None,
+    d_state: int = 64,           # NEW
+    d_conv: int = 4,
+    expand: int = 4,             # NEW
     ffn_expansion_factor: int = 4,
     dropout_rate: float = 0.1
 ) -> ChordFormer:
-    """
-    Builds, initializes, and returns the Minimal Mambaformer model.
-    """
+    
     if output_dims is None:
-        output_dims = [
-            12 * 7 + 1,  # (12 roots * 7 triad qualities) + 1 for 'No Chord'
-            12 + 1,      # 12 bass notes + N
-            4,           # N, 7, b7, bb7
-            4,           # N, 9, #9, b9
-            3,           # N, 11, #11
-            3            # N, 13, b13
-        ]
+        output_dims = [85, 13, 4, 4, 3, 3]
 
     model = ChordFormer(
         input_dim=input_dim,
         model_dim=model_dim,
         num_layers=num_layers,
         output_dims=output_dims,
+        d_state=d_state,         # NEW
+        d_conv=d_conv,           # NEW
+        expand=expand,           # NEW
         ffn_expansion_factor=ffn_expansion_factor,
         dropout_rate=dropout_rate
     )
