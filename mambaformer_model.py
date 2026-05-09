@@ -49,7 +49,7 @@ class PitchAwareEmbedding(nn.Module):
             in_channels=1, 
             out_channels=4, 
             kernel_size=bins_per_octave, 
-            padding=0 # We will handle padding manually in the forward pass
+            padding=0 
         )
         self.activation = nn.SiLU()
         self.projection = nn.Linear(4 * input_dim, model_dim)
@@ -77,64 +77,97 @@ class PitchAwareEmbedding(nn.Module):
         return out
 
 
+class TransientHunter(nn.Module):
+    """
+    Applied EXACTLY ONCE globally. 
+    A wide depthwise convolution to absorb sharp rhythmic attacks 
+    and fast passing chords into the feature space before Mamba processes it.
+    """
+    def __init__(self, dim, kernel_size=31):
+        super(TransientHunter, self).__init__()
+        self.layer_norm = nn.LayerNorm(dim)
+        # Depthwise 1D Conv (groups=dim)
+        self.acoustic_conv = nn.Conv1d(
+            in_channels=dim,
+            out_channels=dim,
+            kernel_size=kernel_size,
+            padding=(kernel_size - 1) // 2,
+            groups=dim
+        )
+        self.activation = nn.SiLU()
+
+    def forward(self, x):
+        residual = x
+        x = self.layer_norm(x)
+        
+        # Conv1d expects (Batch, Channels, Time)
+        x_transposed = x.transpose(1, 2)
+        x_conv = self.acoustic_conv(x_transposed)
+        
+        # Transpose back to (Batch, Time, Channels)
+        x_contextualized = x_conv.transpose(1, 2)
+        x_contextualized = self.activation(x_contextualized)
+        
+        # Residual guarantees the sharp original frame isn't permanently smeared
+        return residual + x_contextualized
+
+
 class MambaSequenceModule(nn.Module):
     """
-    The Bidirectional Mamba replacement for Multi-Head Self-Attention.
+    The Bidirectional Mamba with the Dense Selective (DS) Gate merge.
     """
-    # UPDATED DEFAULTS: d_state=64, d_conv=4, expand=4
-    def __init__(self, dim, d_state=64, d_conv=4, expand=4, dropout_rate=0.1):
+    def __init__(self, dim, d_state=16, d_conv=4, expand=2, dropout_rate=0.1):
         super(MambaSequenceModule, self).__init__()
         self.layer_norm = nn.LayerNorm(dim)
         
-        # We need two independent Mamba blocks to learn forward and backward patterns
-        self.mamba_forward = Mamba(
-            d_model=dim,      
-            d_state=d_state,  
-            d_conv=d_conv,    
-            expand=expand,    
-        )
+        # 1. Forward and Backward Mamba (Highly optimized defaults)
+        self.mamba_forward = Mamba(d_model=dim, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.mamba_backward = Mamba(d_model=dim, d_state=d_state, d_conv=d_conv, expand=expand)
         
-        self.mamba_backward = Mamba(
-            d_model=dim,      
-            d_state=d_state,  
-            d_conv=d_conv,    
-            expand=expand,    
-        )
+        # 2. The DS Gate Components (SIGMA Paper)
+        self.ds_conv = nn.Conv1d(dim, dim, kernel_size=3, padding=1)
+        self.ds_linear = nn.Linear(dim, dim)
+        self.silu = nn.SiLU()
         
-        self.gate = nn.Linear(dim * 2, dim)
-        # self.out_proj = nn.Linear(dim * 2, dim)
+        # 3. Final Projection
+        self.mix_linear = nn.Linear(dim, dim)
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, x):
         residual = x
         x = self.layer_norm(x)
         
-        # 1. Forward Pass
+        # --- PATH A: Forward Mamba ---
         out_forward = self.mamba_forward(x)
         
-        # 2. Backward Pass
-        x_flipped = torch.flip(x, dims=[1])
+        # --- PATH B: Backward Mamba ---
+        # `.contiguous()` is critical here for memory alignment and speed!
+        x_flipped = torch.flip(x, dims=[1]).contiguous()
         out_backward = self.mamba_backward(x_flipped)
-        out_backward = torch.flip(out_backward, dims=[1])
+        out_backward = torch.flip(out_backward, dims=[1]).contiguous()
         
-        # 3. Concatenation and Projection
-        out_concat = torch.cat([out_forward, out_backward], dim=2)
+        # --- PATH C: DS Gate Logic ---
+        # The gate evaluates the local texture (kernel=3) to decide which direction to trust
+        x_transposed = x.transpose(1, 2)
+        gate_features = self.ds_conv(x_transposed).transpose(1, 2)
         
-        # Sigmoid gate decides forward vs backward contribution per channel
-        gate = torch.sigmoid(self.gate(out_concat))
-        x = gate * out_forward + (1 - gate) * out_backward
-        x = self.dropout(x)
+        gate_weights = torch.sigmoid(self.ds_linear(gate_features))
+        gate_silu = self.silu(gate_features)
         
-        return residual + x
+        # Dynamically blend forward and backward signals
+        out = (gate_weights * out_forward) + (gate_silu * out_backward)
+        
+        out = self.mix_linear(out)
+        out = self.dropout(out)
+        
+        return residual + out
 
 
 class MambaformerBlock(nn.Module):
     """
-    The Minimal Mambaformer Block: Mamba -> FFN -> LayerNorm
-    (Removed heavy Conformer convolutions and Macaron topology).
+    The Minimal Mambaformer Block: Bi-Mamba (with DS Gate) -> FFN -> LayerNorm
     """
-    # NEW: Accept the mamba-specific parameters here so they pass down
-    def __init__(self, dim, d_state=64, d_conv=4, expand=4, ffn_expansion_factor=4, dropout_rate=0.1):
+    def __init__(self, dim, d_state=16, d_conv=4, expand=2, ffn_expansion_factor=4, dropout_rate=0.1):
         super(MambaformerBlock, self).__init__()
         
         # Pass the fat state parameters into the sequence module
@@ -157,40 +190,47 @@ class MambaformerBlock(nn.Module):
 
 class ChordFormer(nn.Module):
     """
-    The updated model architecture using Minimal Mambaformer blocks.
+    The optimized architecture using the Transient Hunter and DS-Gated Mamba blocks.
     """
     def __init__(self, 
                  input_dim: int, 
                  model_dim: int, 
                  num_layers: int, 
                  output_dims: List[int],
-                 d_state: int = 64,          # NEW
+                 d_state: int = 16,
                  d_conv: int = 4,
-                 expand: int = 4,            # NEW
+                 expand: int = 2,
                  ffn_expansion_factor: int = 4, 
-                 dropout_rate: float = 0.1):
+                 dropout_rate: float = 0.1,
+                 transient_kernel_size: int = 31): # NEW param
         super(ChordFormer, self).__init__()
         
+        # 1. Frequency/Harmonic Extractor
         self.input_projection = PitchAwareEmbedding(input_dim=input_dim, model_dim=model_dim)
+        
+        # 2. Time/Transient Extractor (Applied EXACTLY ONCE)
+        self.transient_hunter = TransientHunter(dim=model_dim, kernel_size=transient_kernel_size)
 
-        # Using the streamlined Minimal MambaformerBlock
+        # 3. Global Sequence Stack
         self.conformer_layers = nn.ModuleList([
             MambaformerBlock(
                 dim=model_dim,
-                d_state=d_state,     # NEW
-                d_conv=d_conv,       # NEW
-                expand=expand,       # NEW
+                d_state=d_state,  
+                d_conv=d_conv,    
+                expand=expand,    
                 ffn_expansion_factor=ffn_expansion_factor,
                 dropout_rate=dropout_rate
             ) for _ in range(num_layers)
         ])
 
+        # 4. Decoding Heads
         self.output_heads = nn.ModuleList([
             nn.Linear(model_dim, out_dim) for out_dim in output_dims
         ])
 
     def forward(self, x):
         x = self.input_projection(x)
+        x = self.transient_hunter(x)
 
         for layer in self.conformer_layers:
             x = layer(x)
@@ -204,11 +244,12 @@ def build_chordformer(
     model_dim: int = 256,
     num_layers: int = 4,
     output_dims: Optional[List[int]] = None,
-    d_state: int = 64,           # NEW
+    d_state: int = 16,           
     d_conv: int = 4,
-    expand: int = 4,             # NEW
+    expand: int = 2,             
     ffn_expansion_factor: int = 4,
-    dropout_rate: float = 0.1
+    dropout_rate: float = 0.1,
+    transient_kernel_size: int = 31
 ) -> ChordFormer:
     
     if output_dims is None:
@@ -219,27 +260,31 @@ def build_chordformer(
         model_dim=model_dim,
         num_layers=num_layers,
         output_dims=output_dims,
-        d_state=d_state,         # NEW
-        d_conv=d_conv,           # NEW
-        expand=expand,           # NEW
+        d_state=d_state,         
+        d_conv=d_conv,           
+        expand=expand,           
         ffn_expansion_factor=ffn_expansion_factor,
-        dropout_rate=dropout_rate
+        dropout_rate=dropout_rate,
+        transient_kernel_size=transient_kernel_size
     )
     
-    # Only explicitly init the layers YOU defined
+    # Initialize standard layers
     for module in [model.input_projection, model.output_heads]:
         for p in module.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
+    # Initialize Mambaformer specific weights
     for layer in model.conformer_layers:
         for p in layer.ffn.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
-        for p in layer.final_layer_norm.parameters():
-            pass  # LayerNorm handles its own init fine
-        # out_proj is yours, init it
-        for p in layer.sequence_module.gate.parameters():
+        
+        # Initialize the new DS Gate Linear layers
+        for p in layer.sequence_module.ds_linear.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+        for p in layer.sequence_module.mix_linear.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
         # Leave layer.sequence_module.mamba_forward and mamba_backward alone
