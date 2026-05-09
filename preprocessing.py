@@ -63,7 +63,7 @@ class PreprocessingConfig:
     fmin_note: str = "C1"
     n_bins: int = 252
     bins_per_octave: int = 36
-    segment_seconds: float = 10.0
+    segment_seconds: float = 23.2
     max_songs: Optional[int] = None
     use_cache: bool = True
     refresh_cache: bool = False
