@@ -101,7 +101,8 @@ class MambaSequenceModule(nn.Module):
             expand=expand,    
         )
         
-        self.out_proj = nn.Linear(dim * 2, dim)
+        self.gate = nn.Linear(dim * 2, dim)
+        # self.out_proj = nn.Linear(dim * 2, dim)
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, x):
@@ -118,7 +119,10 @@ class MambaSequenceModule(nn.Module):
         
         # 3. Concatenation and Projection
         out_concat = torch.cat([out_forward, out_backward], dim=2)
-        x = self.out_proj(out_concat)
+        
+        # Sigmoid gate decides forward vs backward contribution per channel
+        gate = torch.sigmoid(self.gate(out_concat))
+        x = gate * out_forward + (1 - gate) * out_backward
         x = self.dropout(x)
         
         return residual + x
@@ -222,9 +226,23 @@ def build_chordformer(
         dropout_rate=dropout_rate
     )
     
-    for p in model.parameters():
-        if p.dim() > 1:
-            nn.init.xavier_uniform_(p)
+    # Only explicitly init the layers YOU defined
+    for module in [model.input_projection, model.output_heads]:
+        for p in module.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    for layer in model.conformer_layers:
+        for p in layer.ffn.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+        for p in layer.final_layer_norm.parameters():
+            pass  # LayerNorm handles its own init fine
+        # out_proj is yours, init it
+        for p in layer.sequence_module.gate.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+        # Leave layer.sequence_module.mamba_forward and mamba_backward alone
             
     return model
 
