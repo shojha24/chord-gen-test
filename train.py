@@ -71,8 +71,8 @@ class ChordFormerLoss(nn.Module):
 def compute_class_weights(
     dataset, 
     output_dims: List[int], 
-    gamma: float = 0.7, 
-    w_max: float = 20.0, 
+    gamma: float = 0.5, 
+    w_max: float = 10.0, 
     eps: float = 1e-6
 ) -> List[torch.Tensor]:
     """
@@ -306,8 +306,8 @@ def train_model(
     class_weights = compute_class_weights(
         train_dataloader.dataset, 
         output_dims, 
-        gamma=0.7, 
-        w_max=20.0
+        gamma=0.5, 
+        w_max=10.0
     ) if use_class_weights else None
 
     model = build_chordformer().to(device)

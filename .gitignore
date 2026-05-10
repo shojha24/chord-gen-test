@@ -11,3 +11,4 @@ music_models
 *.sf2
 .cache
 *.deb
+__pycache__
