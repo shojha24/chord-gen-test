@@ -8,10 +8,9 @@ from typing import List, Optional
 from chordformer_model import build_chordformer 
 from preprocessing import PreprocessingConfig, create_dataloaders
 from sklearn.metrics import classification_report, recall_score, accuracy_score
+import numpy as np
 
 torch.set_float32_matmul_precision('high')
-
-
 
 """
 # --- 1. Placeholder Dataset (Unchanged) ---
@@ -47,14 +46,13 @@ class ChordFormerLoss(nn.Module):
         # Using nn.ModuleList automatically handles pushing the loss functions 
         # (and their internal weight tensors) to the correct GPU/device
         self.loss_functions = nn.ModuleList()
-        self.ignore_index = ignore_index
         
         if class_weights:
             for weights in class_weights:
-                self.loss_functions.append(nn.CrossEntropyLoss(weight=weights, ignore_index=self.ignore_index))
+                self.loss_functions.append(nn.CrossEntropyLoss(weight=weights, ignore_index=ignore_index))
         else:
             for _ in range(6):  
-                self.loss_functions.append(nn.CrossEntropyLoss(ignore_index=self.ignore_index))
+                self.loss_functions.append(nn.CrossEntropyLoss(ignore_index=ignore_index))
 
     def forward(self, predictions: List[torch.Tensor], targets: List[torch.Tensor]) -> torch.Tensor:
         total_loss = 0.0
@@ -102,14 +100,20 @@ def compute_class_weights(
     weights: List[torch.Tensor] = []
     
     for i, count in enumerate(counts):
+        # Find the maximum class frequency for this specific head
         max_count = count.max() 
         if max_count == 0:
+            # Fallback if a head is completely empty (shouldn't happen with real data)
             weights.append(torch.ones(output_dims[i], dtype=torch.float32))
             continue
             
+        # (n_m / max_n)
         ratio = count / max_count
+        # Add epsilon to prevent 0^(-gamma), which evaluates to infinity
         ratio = torch.clamp(ratio, min=eps)
+        # (ratio)^(-gamma)
         w = ratio ** (-gamma)
+        # Clamp to w_max
         w = torch.clamp(w, max=w_max)
         weights.append(w.to(torch.float32))
         
@@ -193,8 +197,9 @@ def run_validation(model, val_dataloader, device, loss_fn):
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 predictions = model(cqt_segments)
                 loss = loss_fn(predictions, target_labels)
-                
+            
             total_val_loss += loss.item()
+            
     avg_loss = total_val_loss / len(val_dataloader)
     print(f"Validation Loss: {avg_loss:.4f}")
     return avg_loss
@@ -206,6 +211,7 @@ def run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=None):
     Runs final evaluation on the test set, outputting detailed precision, recall, 
     and F1-scores to diagnose class imbalance.
     """
+    
     model.eval()
     total_loss = 0
     all_preds = [[] for _ in range(6)]
@@ -240,15 +246,17 @@ def run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=None):
     head_names = ["Root/Triad", "Bass", "7th", "9th", "11th", "13th"]
     
     for i in range(6):
-        targets_np = all_targets[i]
-        # Evaluate using CRF predictions if available, otherwise raw argmax
-        preds_to_use = all_crf_preds[i] if all_crf_preds is not None else all_preds[i]
+        targets_np   = np.array(all_targets[i])
+        preds_to_use = np.array(all_crf_preds[i] if all_crf_preds is not None else all_preds[i])
+
         
-        # Frame-wise accuracy is standard accuracy
-        acc_frame = accuracy_score(targets_np, preds_to_use)
-        
-        # Class-wise accuracy is equivalent to macro-averaged recall
-        acc_class = recall_score(targets_np, preds_to_use, average='macro', zero_division=0)
+        valid_mask    = targets_np != -100
+        targets_valid = targets_np[valid_mask]
+        preds_valid   = preds_to_use[valid_mask]
+
+        acc_frame = accuracy_score(targets_valid, preds_valid)
+        acc_class = recall_score(targets_valid, preds_valid, average='macro', zero_division=0)
+
         
         print(f"=== Head {i+1}: {head_names[i]} ===")
         print(f"Frame-wise Accuracy (acc_frame): {acc_frame:.4f}")
@@ -256,7 +264,7 @@ def run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=None):
         print("Detailed Report per Class:")
         
         # Zero division is set to 0 to prevent warnings if a rare class is never predicted
-        report = classification_report(targets_np, preds_to_use, zero_division=0, digits=4)
+        report = classification_report(targets_valid, preds_valid, zero_division=0, digits=4)
         print(report)
         print("-" * 50)
         
@@ -268,7 +276,7 @@ def train_model(
     max_epochs=200, # Failsafe limit, training will likely stop before this
     lr=1e-3, 
     batch_size=8,             # REDUCED from 48 to fit 6GB VRAM
-    accumulation_steps=6,     # NEW: 8 x 6 = 48 effective batch size
+    accumulation_steps=6,     # NEW: 8 x 6 = 48 (Keeps your effective batch size the same)
     experiment_name="runs/chordformer_final",
     dataset_root="bello_dataset",
     segment_seconds=10.0,
@@ -318,7 +326,6 @@ def train_model(
     # NEW: Initialize the Mixed Precision Scaler
     scaler = torch.amp.GradScaler('cuda') 
     
-    # UPDATED: Loop over max_epochs, but rely on the early stopping condition
     for epoch in range(max_epochs):
         model.train()
         batch_iterator = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}/{max_epochs}")
@@ -337,6 +344,7 @@ def train_model(
                 loss = loss_fn(predictions, target_labels)
                 
                 # NEW: Divide the loss by the number of accumulation steps 
+                # so the math stays balanced over the accumulated batches
                 loss = loss / accumulation_steps
             
             # NEW: Scale the loss and accumulate gradients backward
@@ -357,7 +365,8 @@ def train_model(
                 # Clear the accumulated gradients for the next cycle
                 optimizer.zero_grad()
 
-            # Multiply by accumulation_steps for the printout/logs so you see the "true" magnitude
+            # Note: We multiply by accumulation_steps for the printout so you 
+            # see the "true" loss magnitude on Tensorboard, not the divided one.
             batch_iterator.set_postfix(loss=(loss.item() * accumulation_steps))
             writer.add_scalar('Loss/train', (loss.item() * accumulation_steps), global_step)
             global_step += 1
@@ -388,14 +397,15 @@ def train_model(
 
 
 if __name__ == "__main__":
-   #train_model()
+    train_model()
 
+    
     # To run final evaluation on one of the saved models instead of running the full training loop, you can use the following code snippet. 
     # Make sure to adjust the model path and dataset configuration as needed.
     # The test set this is run on should be the same one used during training for a valid evaluation.
     # This should be the case because the dataset will be cached in .cache/chordformer with the same splits.
 
-    
+    """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     model = build_chordformer().to(device)
@@ -411,5 +421,6 @@ if __name__ == "__main__":
     _, _, test_dataloader = create_dataloaders(dataset_cfg, batch_size=48)
     loss_fn = ChordFormerLoss().to(device)  # Use unweighted loss for evaluation
     run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=2.0)
+    """
     
-
+    
