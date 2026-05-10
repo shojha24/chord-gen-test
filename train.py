@@ -8,6 +8,7 @@ from typing import List, Optional
 from mambaformer_model import build_chordformer 
 from preprocessing import PreprocessingConfig, create_dataloaders
 from sklearn.metrics import classification_report, recall_score, accuracy_score
+import numpy as np
 
 torch.set_float32_matmul_precision('high')
 
@@ -245,15 +246,17 @@ def run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=None):
     head_names = ["Root/Triad", "Bass", "7th", "9th", "11th", "13th"]
     
     for i in range(6):
-        targets_np = all_targets[i]
-        # Evaluate using CRF predictions if available, otherwise raw argmax
-        preds_to_use = all_crf_preds[i] if all_crf_preds is not None else all_preds[i]
+        targets_np   = np.array(all_targets[i])
+        preds_to_use = np.array(all_crf_preds[i] if all_crf_preds is not None else all_preds[i])
+
         
-        # Frame-wise accuracy is standard accuracy
-        acc_frame = accuracy_score(targets_np, preds_to_use)
-        
-        # Class-wise accuracy is equivalent to macro-averaged recall
-        acc_class = recall_score(targets_np, preds_to_use, average='macro', zero_division=0)
+        valid_mask    = targets_np != -100
+        targets_valid = targets_np[valid_mask]
+        preds_valid   = preds_to_use[valid_mask]
+
+        acc_frame = accuracy_score(targets_valid, preds_valid)
+        acc_class = recall_score(targets_valid, preds_valid, average='macro', zero_division=0)
+
         
         print(f"=== Head {i+1}: {head_names[i]} ===")
         print(f"Frame-wise Accuracy (acc_frame): {acc_frame:.4f}")
@@ -261,7 +264,7 @@ def run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=None):
         print("Detailed Report per Class:")
         
         # Zero division is set to 0 to prevent warnings if a rare class is never predicted
-        report = classification_report(targets_np, preds_to_use, zero_division=0, digits=4)
+        report = classification_report(targets_valid, preds_valid, zero_division=0, digits=4)
         print(report)
         print("-" * 50)
         
@@ -394,7 +397,7 @@ def train_model(
 
 
 if __name__ == "__main__":
-    train_model()
+    # train_model()
 
     
     # To run final evaluation on one of the saved models instead of running the full training loop, you can use the following code snippet. 
@@ -402,11 +405,11 @@ if __name__ == "__main__":
     # The test set this is run on should be the same one used during training for a valid evaluation.
     # This should be the case because the dataset will be cached in .cache/chordformer with the same splits.
 
-    """
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     model = build_chordformer().to(device)
-    model.load_state_dict(torch.load("chordformer_models/4-30_epoch_30_best.pt", map_location=device))
+    model.load_state_dict(torch.load("chordformer_models/5-9_epoch_42_last_2.pt", map_location=device))
     dataset_cfg = PreprocessingConfig(
         dataset_root="bello_dataset",
         segment_seconds=10.0,
@@ -418,6 +421,6 @@ if __name__ == "__main__":
     _, _, test_dataloader = create_dataloaders(dataset_cfg, batch_size=48)
     loss_fn = ChordFormerLoss().to(device)  # Use unweighted loss for evaluation
     run_evaluation(model, test_dataloader, device, loss_fn, crf_penalty=2.0)
-    """
+    
     
     
