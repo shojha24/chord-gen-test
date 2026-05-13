@@ -313,7 +313,7 @@ def train_model(
         w_max=10.0
     ) if use_class_weights else None
 
-    model = build_chordformer().to(device)
+    model = build_chordformer(expand=1).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     
     # UPDATED: Patience changed from 3 to 5 to match the paper
@@ -408,7 +408,7 @@ if __name__ == "__main__":
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    model = build_chordformer().to(device)
+    model = build_chordformer(expand=1).to(device)
     model.load_state_dict(torch.load("chordformer_models/5-9_epoch_42_last_2.pt", map_location=device))
     dataset_cfg = PreprocessingConfig(
         dataset_root="bello_dataset",

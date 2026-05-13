@@ -357,59 +357,6 @@ class SlidingWindowAttention(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# NEW: Calibrated output head
-# ---------------------------------------------------------------------------
-
-class CalibratedHead(nn.Module):
-    """
-    Linear output head with a learnable per-head temperature scalar.
-
-    WHY THIS EXISTS
-    ---------------
-    The benchmark comparison showed that your Mamba model and Chordformer have
-    nearly identical frame-wise accuracy (argmax correctness) but a large test
-    loss gap (2.84 vs 2.26).  Cross-entropy loss is sensitive not just to which
-    class is predicted but to how confidently it is predicted:
-
-        loss = -log(p_correct)
-
-    A model predicting the correct class with 51 % confidence has loss 0.67;
-    one predicting it with 90 % confidence has loss 0.11.  The Mamba model
-    produces flatter softmax distributions — it gets the argmax right but
-    hedges its probability mass across neighbouring classes.  This is a
-    calibration problem, not an accuracy problem.
-
-    The temperature scalar T divides the logits before softmax:
-
-        p = softmax(logits / T)
-
-    When T < 1 the distribution sharpens; when T > 1 it flattens.  Learned
-    jointly during training, T will converge to whatever value minimises the
-    cross-entropy on your training data — effectively teaching the model to be
-    appropriately confident.
-
-    This is a near-zero-cost intervention: one scalar parameter per head
-    (6 parameters total across all heads), no change to the model's
-    representational capacity, no change to training procedure.  It should be
-    the first thing you evaluate because it can close a meaningful fraction of
-    the loss gap without any architectural risk.
-
-    The clamp(min=0.1) prevents T from going negative or vanishing, which
-    would cause numerical instability.
-    """
-
-    def __init__(self, in_dim: int, out_dim: int):
-        super().__init__()
-        self.linear      = nn.Linear(in_dim, out_dim)
-        # Initialise at 1.0 so the model starts with unscaled logits and
-        # learns to sharpen/broaden from there.
-        self.temperature = nn.Parameter(torch.ones(1))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear(x) / self.temperature.clamp(min=0.1)
-
-
-# ---------------------------------------------------------------------------
 # MambaformerBlock  (updated to support use_swa flag)
 # ---------------------------------------------------------------------------
 
@@ -548,7 +495,7 @@ class ChordFormer(nn.Module):
         # scalar per head (6 extra parameters total) to address the
         # confidence gap identified in the loss vs accuracy analysis.
         self.output_heads = nn.ModuleList([
-            CalibratedHead(model_dim, out_dim) for out_dim in output_dims
+            nn.Linear(model_dim, out_dim) for out_dim in output_dims
         ])
 
     def forward(self, x):
@@ -593,7 +540,7 @@ def build_chordformer(
 
     if d_state_schedule is None:
         half             = num_layers // 2
-        d_state_schedule = [16] * half + [64] * (num_layers - half)
+        d_state_schedule = [32] * half + [64] * (num_layers - half)
 
     assert len(d_state_schedule) == num_layers
 
@@ -619,10 +566,9 @@ def build_chordformer(
         if p.dim() > 1:
             nn.init.xavier_uniform_(p)
 
-    # Output heads — initialise the linear weight; temperature starts at 1.0
-    # (set in CalibratedHead.__init__) so no extra init needed here.
+    # Output heads
     for head in model.output_heads:
-        for p in head.linear.parameters():
+        for p in head.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
@@ -676,9 +622,10 @@ def build_chordformer(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    model = build_chordformer()
+    model = build_chordformer(expand=1)
     print(model)
 
+    """
     dummy_cqt = torch.randn(2, 1000, 252)
     preds     = model(dummy_cqt)
 
@@ -687,6 +634,7 @@ if __name__ == "__main__":
     print("Output shapes per head:")
     for i, p in enumerate(preds):
         print(f"  Head {i+1}: {p.shape}")
+    """
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"\nTotal parameters: {total_params:,}")
@@ -695,5 +643,5 @@ if __name__ == "__main__":
     print("\nPer-block parameter counts:")
     for i, layer in enumerate(model.conformer_layers):
         n     = sum(p.numel() for p in layer.parameters())
-        kind  = "SWA" if i == 3 else f"BiMamba d_state={[16,16,64,64][i]}"
+        kind  = "SWA" if i == 3 else f"BiMamba d_state={[32,32,64,64][i]}"
         print(f"  Block {i} ({kind}): {n:,}")
