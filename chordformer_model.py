@@ -387,6 +387,7 @@ if __name__ == "__main__":
     chordformer_model = build_chordformer()
     print(chordformer_model)
 
+    """
     dummy_cqt = torch.randn(8, 1000, 252)
     predictions = chordformer_model(dummy_cqt)
 
@@ -395,3 +396,8 @@ if __name__ == "__main__":
     print("Output shapes for each chord component head:")
     for i, p in enumerate(predictions):
         print(f"  Head {i+1}: {p.shape}")
+    """
+
+    # Print # of params
+    total_params = sum(p.numel() for p in chordformer_model.parameters())
+    print(f"\nTotal number of parameters in ChordFormer: {total_params:,}")
